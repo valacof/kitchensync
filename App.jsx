@@ -690,29 +690,41 @@ function TabStock({ resto, yo, esJefe, restoId }) {
   const [busqueda,setBusqueda]=useState("");
   const [selCat,setSelCat]=useState("Todas");
   const [nuevo,setNuevo]=useState({nombre:"",stock:"",minStock:"",unidad:"ud",categoria:"",proveedorId:""});
-  const [sel,setSel]=useState([]);
+  const [sel,setSel]=useState([]); // array de {nombre, unidad} para poder editar la unidad
   const productos=objToArr(resto.productos||{});
   const proveedores=objToArr(resto.proveedores||{});
   const recetas=objToArr(resto.recetas||{});
   const empleados=objToArr(resto.empleados||{});
 
+  // Bug fix 2: stock y minStock pueden ser 0, solo bloquear si nombre está vacío
   const agregarProducto=async()=>{
-    if(!nuevo.nombre||nuevo.stock===""||nuevo.minStock==="") return;
+    if(!nuevo.nombre.trim()) return;
     const id=uid();
-    await dbSet(`restaurantes/${restoId}/productos/${id}`,{id,nombre:nuevo.nombre,stock:parseFloat(nuevo.stock),minStock:parseFloat(nuevo.minStock),unidad:nuevo.unidad,categoria:nuevo.categoria||"General",proveedorId:nuevo.proveedorId||null});
+    await dbSet(`restaurantes/${restoId}/productos/${id}`,{
+      id, nombre:nuevo.nombre,
+      stock: nuevo.stock===""?0:parseFloat(nuevo.stock),
+      minStock: nuevo.minStock===""?0:parseFloat(nuevo.minStock),
+      unidad:nuevo.unidad, categoria:nuevo.categoria||"General", proveedorId:nuevo.proveedorId||null
+    });
     setNuevo({nombre:"",stock:"",minStock:"",unidad:"ud",categoria:"",proveedorId:""}); setShowAdd(false);
   };
 
+  // Bug fix 1: usar la unidad editada por el usuario, no la del catálogo fijo
   const agregarDesdeCatalogo=async()=>{
     if(!sel.length) return;
     const updates={};
-    sel.filter(nombre=>!productos.find(p=>p.nombre===nombre)).forEach(nombre=>{
-      const cat=CATALOGO.find(c=>c.nombre===nombre);
+    sel.filter(item=>!productos.find(p=>p.nombre===item.nombre)).forEach(item=>{
+      const cat=CATALOGO.find(c=>c.nombre===item.nombre);
       const id=uid();
-      updates[`restaurantes/${restoId}/productos/${id}`]={id,nombre,stock:0,minStock:0,unidad:cat?.unidad||"ud",categoria:cat?.categoria||"General",proveedorId:null};
+      updates[`restaurantes/${restoId}/productos/${id}`]={id,nombre:item.nombre,stock:0,minStock:0,unidad:item.unidad,categoria:cat?.categoria||"General",proveedorId:null};
     });
     if(Object.keys(updates).length) await fbMultiUpdate(updates);
     setSel([]); setShowAdd(false); setBusqueda("");
+  };
+
+  // Cambiar unidad de un item seleccionado del catálogo
+  const cambiarUnidadSel=(nombre,unidad)=>{
+    setSel(prev=>prev.map(item=>item.nombre===nombre?{...item,unidad}:item));
   };
 
   const ajustarStock=async(id,delta)=>{
@@ -724,7 +736,11 @@ function TabStock({ resto, yo, esJefe, restoId }) {
   };
 
   const eliminar=async id=>await dbSet(`restaurantes/${restoId}/productos/${id}`,null);
-  const toggleSel=nombre=>setSel(prev=>prev.includes(nombre)?prev.filter(n=>n!==nombre):[...prev,nombre]);
+  const toggleSel=c=>{
+    const yaEsta=sel.find(item=>item.nombre===c.nombre);
+    if(yaEsta) setSel(prev=>prev.filter(item=>item.nombre!==c.nombre));
+    else setSel(prev=>[...prev,{nombre:c.nombre,unidad:c.unidad}]);
+  };
   const categorias=[...new Set(productos.map(p=>p.categoria))];
   const catsCatalogo=["Todas",...new Set(CATALOGO.map(c=>c.categoria))];
   const catalogoFiltrado=CATALOGO.filter(c=>!productos.find(p=>p.nombre===c.nombre)&&c.nombre.toLowerCase().includes(busqueda.toLowerCase())&&(selCat==="Todas"||c.categoria===selCat));
@@ -777,11 +793,24 @@ function TabStock({ resto, yo, esJefe, restoId }) {
               <div style={{maxHeight:240,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
                 {catalogoFiltrado.length===0?<div style={{color:"#444",fontSize:13,textAlign:"center",padding:"20px 0"}}>Sin resultados — prueba el modo personalizado</div>
                   :catalogoFiltrado.map(c=>{
-                    const s=sel.includes(c.nombre);
-                    return (<div key={c.nombre} onClick={()=>toggleSel(c.nombre)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"9px 12px",borderRadius:8,cursor:"pointer",background:s?"#E8733A11":"transparent",border:`1px solid ${s?"#E8733A44":"transparent"}`,transition:"all .15s"}}>
-                      <div><div style={{fontSize:13,color:s?"#E8733A":"#ddd",fontWeight:s?600:400}}>{c.nombre}</div><div style={{fontSize:11,color:"#555"}}>{c.categoria} · {c.unidad}</div></div>
-                      <div style={{width:18,height:18,borderRadius:5,border:`2px solid ${s?"#E8733A":"#333"}`,background:s?"#E8733A":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:11,color:"#fff",fontWeight:700}}>{s?"✓":""}</div>
-                    </div>);
+                    const selItem=sel.find(item=>item.nombre===c.nombre);
+                    const s=!!selItem;
+                    return (
+                      <div key={c.nombre} style={{borderRadius:8,border:`1px solid ${s?"#E8733A44":"transparent"}`,background:s?"#E8733A11":"transparent",transition:"all .15s",overflow:"hidden"}}>
+                        <div onClick={()=>toggleSel(c)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"9px 12px",cursor:"pointer"}}>
+                          <div><div style={{fontSize:13,color:s?"#E8733A":"#ddd",fontWeight:s?600:400}}>{c.nombre}</div><div style={{fontSize:11,color:"#555"}}>{c.categoria}</div></div>
+                          <div style={{width:18,height:18,borderRadius:5,border:`2px solid ${s?"#E8733A":"#333"}`,background:s?"#E8733A":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:11,color:"#fff",fontWeight:700}}>{s?"✓":""}</div>
+                        </div>
+                        {s&&(
+                          <div style={{display:"flex",alignItems:"center",gap:8,padding:"4px 12px 10px"}} onClick={e=>e.stopPropagation()}>
+                            <span style={{fontSize:11,color:"#888"}}>Unidad:</span>
+                            <select className="ks-input" style={{flex:1,padding:"4px 8px",fontSize:12}} value={selItem.unidad} onChange={e=>cambiarUnidadSel(c.nombre,e.target.value)}>
+                              {UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    );
                   })}
               </div>
               <div style={{fontSize:11,color:"#555",textAlign:"center"}}>Se añaden con stock 0. Ajusta el mínimo después.</div>
