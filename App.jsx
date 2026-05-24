@@ -868,27 +868,39 @@ async function subirCloudinary(file) {
 }
 
 async function extraerRecetaConGemini(file, fileUrl) {
-  // Convertir archivo a base64
   const toBase64 = f => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(f); });
   const b64 = await toBase64(file);
   const mimeType = file.type || "application/pdf";
 
-  const prompt = `Eres un asistente de cocina. Analiza esta receta (imagen o PDF) y extrae la información en JSON con este formato exacto, sin markdown ni texto extra:
+  const prompt = `Eres un asistente de cocina profesional. Analiza este documento (puede ser una imagen o PDF con una o varias recetas) y extrae TODAS las recetas que encuentres.
+
+Devuelve ÚNICAMENTE un JSON válido con este formato exacto, sin markdown, sin texto extra, sin explicaciones:
 {
-  "nombre": "nombre del plato",
-  "descripcion": "descripción breve del método de elaboración",
-  "ingredientes": [
-    {"nombre": "nombre ingrediente", "cantidad": número, "unidad": "kg|g|L|ml|ud|bote|caja|bolsa|ración"}
+  "recetas": [
+    {
+      "nombre": "nombre del plato",
+      "descripcion": "descripción breve del método de elaboración",
+      "ingredientes": [
+        {"nombre": "nombre ingrediente", "cantidad": número, "unidad": "kg|g|L|ml|ud|bote|caja|bolsa|ración"}
+      ]
+    }
   ]
 }
-Si no encuentras algún campo, usa string vacío o array vacío. Las cantidades deben ser números. Las unidades deben ser una de las listadas.`;
+
+Reglas importantes:
+- Si solo hay una receta, el array "recetas" tendrá un solo elemento
+- Si hay varias recetas, inclúyelas todas en el array
+- Las cantidades deben ser números (no texto)
+- Si no puedes determinar una cantidad exacta, usa 1
+- Las unidades deben ser una de las listadas, elige la más apropiada
+- Si no encuentras descripción, usa string vacío`;
 
   const body = {
     contents:[{ parts:[
       { text: prompt },
       { inline_data:{ mime_type: mimeType, data: b64 } }
     ]}],
-    generationConfig:{ temperature:0.1, maxOutputTokens:1000 }
+    generationConfig:{ temperature:0.1, maxOutputTokens:4000 }
   };
 
   const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`, {
@@ -896,9 +908,12 @@ Si no encuentras algún campo, usa string vacío o array vacío. Las cantidades 
   });
   const d = await r.json();
   const texto = d.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  // Limpiar posibles markdown backticks
   const limpio = texto.replace(/```json|```/g,"").trim();
-  return JSON.parse(limpio);
+  const parsed = JSON.parse(limpio);
+  // Normalizar: si devuelve objeto con "recetas" o directamente un array
+  if(parsed.recetas) return parsed.recetas;
+  if(Array.isArray(parsed)) return parsed;
+  return [parsed]; // una sola receta sin wrapper
 }
 
 // ─── TAB RECETAS ─────────────────────────────────────────────────────────────
@@ -938,33 +953,47 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
   // Subir archivo y analizar con Gemini
   const procesarArchivo=async(file)=>{
     setIaFile(file); setIaEstado("subiendo"); setIaResultado(null);
-    // Preview si es imagen
     if(file.type.startsWith("image/")) setIaPreview(URL.createObjectURL(file));
     else setIaPreview(null);
     try {
-      // 1. Subir a Cloudinary
       const {url} = await subirCloudinary(file);
       setArchivoUrl(url);
-      // 2. Analizar con Gemini
       setIaEstado("analizando");
-      const resultado = await extraerRecetaConGemini(file, url);
-      setIaResultado(resultado);
-      // 3. Prefill el formulario
-      const ingsObj={};
-      const extras=[];
-      (resultado.ingredientes||[]).forEach(ing=>{
-        const prod=productos.find(p=>p.nombre.toLowerCase()===ing.nombre.toLowerCase());
-        const id=uid();
-        if(prod) ingsObj[id]={id,productoId:prod.id,cantidad:ing.cantidad,unidad:ing.unidad||"ud"};
-        else extras.push({...ing,id,productoId:""});
+      const recetas = await extraerRecetaConGemini(file, url);
+      // Para cada receta detectada, calcular qué ingredientes están en DB y cuáles no
+      const recetasProcesadas = recetas.map(re=>{
+        const ingsEnDB={};
+        const ingsExtras=[];
+        (re.ingredientes||[]).forEach(ing=>{
+          const prod=productos.find(p=>p.nombre.toLowerCase()===ing.nombre.toLowerCase());
+          const id=uid();
+          if(prod) ingsEnDB[id]={id,productoId:prod.id,cantidad:ing.cantidad,unidad:ing.unidad||"ud"};
+          else ingsExtras.push({...ing,id});
+        });
+        return { ...re, ingsEnDB, ingsExtras, seleccionada:true };
       });
-      setIaIngExtras(extras);
-      setNueva(p=>({...p, nombre:resultado.nombre||"", descripcion:resultado.descripcion||"", ingredientes:ingsObj}));
+      setIaResultado(recetasProcesadas);
       setIaEstado("listo");
     } catch(e) {
       console.error(e);
       setIaEstado("error");
     }
+  };
+
+  // Guardar todas las recetas seleccionadas de una vez
+  const guardarRecetasIA=async()=>{
+    if(!iaResultado?.length) return;
+    const updates={};
+    iaResultado.filter(re=>re.seleccionada).forEach(re=>{
+      const id=uid();
+      updates[`restaurantes/${restoId}/recetas/${id}`]={
+        id, nombre:re.nombre, descripcion:re.descripcion||"",
+        responsableId:"", productoResultadoId:"", cantidadResultado:0, unidadResultado:"ud",
+        ingredientes:re.ingsEnDB, archivoUrl:archivoUrl, ts:Date.now()
+      };
+    });
+    if(Object.keys(updates).length) await fbMultiUpdate(updates);
+    resetModal();
   };
 
   const resetIA=()=>{ setIaFile(null); setIaPreview(null); setIaEstado("idle"); setIaResultado(null); setIaIngExtras([]); setArchivoUrl(""); };
@@ -1054,49 +1083,60 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
               {iaEstado==="listo"&&iaResultado&&(
                 <>
                   <div style={{background:"#4EC9A011",border:"1px solid #4EC9A044",borderRadius:10,padding:"10px 14px",fontSize:13,color:"#4EC9A0"}}>
-                    ✅ Receta detectada — revisa y ajusta antes de guardar
+                    ✅ {iaResultado.length} receta{iaResultado.length>1?"s":""}  detectada{iaResultado.length>1?"s":""} — revisa y guarda
                   </div>
-                  {iaPreview&&<img src={iaPreview} alt="preview" style={{width:"100%",borderRadius:8,maxHeight:150,objectFit:"cover"}}/>}
+                  {iaPreview&&<img src={iaPreview} alt="preview" style={{width:"100%",borderRadius:8,maxHeight:120,objectFit:"cover"}}/>}
 
-                  <label className="ks-label">Nombre</label>
-                  <input className="ks-input" value={nueva.nombre} onChange={e=>setNueva(p=>({...p,nombre:e.target.value}))}/>
-                  <label className="ks-label">Descripción</label>
-                  <input className="ks-input" value={nueva.descripcion} onChange={e=>setNueva(p=>({...p,descripcion:e.target.value}))}/>
-
-                  {/* Ingredientes detectados en DB */}
-                  {objToArr(nueva.ingredientes).length>0&&(
-                    <>
-                      <div style={{fontSize:12,fontWeight:700,color:"#4EC9A0",textTransform:"uppercase",letterSpacing:0.5}}>✅ Encontrados en stock</div>
-                      {objToArr(nueva.ingredientes).map((ing,i)=>{
-                        const prod=productos.find(p=>p.id===ing.productoId);
-                        return (<div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #1a1a1a",fontSize:13}}><span style={{color:"#ccc"}}>{prod?.nombre}</span><span style={{color:"#888"}}>{ing.cantidad} {ing.unidad}</span></div>);
-                      })}
-                    </>
-                  )}
-
-                  {/* Ingredientes NO encontrados en DB */}
-                  {iaIngExtras.length>0&&(
-                    <>
-                      <div style={{fontSize:12,fontWeight:700,color:"#E8733A",textTransform:"uppercase",letterSpacing:0.5}}>⚠️ No están en tu inventario</div>
-                      <div style={{fontSize:11,color:"#666"}}>Estos ingredientes no están en tu stock. Puedes añadirlos desde la pestaña Stock.</div>
-                      {iaIngExtras.map((ing,i)=>(
-                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #1a1a1a",fontSize:13}}>
-                          <span style={{color:"#E8733A"}}>{ing.nombre}</span>
-                          <span style={{color:"#888"}}>{ing.cantidad} {ing.unidad}</span>
+                  {iaResultado.map((re,idx)=>(
+                    <div key={idx} style={{background:"#111",border:`1px solid ${re.seleccionada?"#E8733A44":"#222"}`,borderRadius:12,padding:"12px",display:"flex",flexDirection:"column",gap:8}}>
+                      {/* Cabecera con checkbox */}
+                      <div style={{display:"flex",alignItems:"center",gap:10}}>
+                        <button
+                          className={`ks-check${re.seleccionada?" ks-check-done":""}`}
+                          onClick={()=>setIaResultado(prev=>prev.map((r,i)=>i===idx?{...r,seleccionada:!r.seleccionada}:r))}>
+                          {re.seleccionada?"✓":""}
+                        </button>
+                        <div style={{flex:1}}>
+                          <input className="ks-input" style={{fontWeight:700,fontSize:14}} value={re.nombre}
+                            onChange={e=>setIaResultado(prev=>prev.map((r,i)=>i===idx?{...r,nombre:e.target.value}:r))}/>
                         </div>
-                      ))}
-                    </>
-                  )}
+                      </div>
 
-                  <label className="ks-label">Responsable</label>
-                  <select className="ks-input" value={nueva.responsableId} onChange={e=>setNueva(p=>({...p,responsableId:e.target.value}))}>
-                    <option value="">— Sin asignar —</option>
-                    {empleados.map(e=><option key={e.id} value={e.id}>{ROLES[e.rol]?.icon} {e.nombre}</option>)}
-                  </select>
+                      {re.descripcion&&<div style={{fontSize:12,color:"#666",paddingLeft:32}}>{re.descripcion}</div>}
+
+                      {/* Ingredientes en DB */}
+                      {Object.values(re.ingsEnDB||{}).length>0&&(
+                        <div style={{paddingLeft:32}}>
+                          <div style={{fontSize:11,color:"#4EC9A0",fontWeight:700,marginBottom:4}}>✅ En inventario</div>
+                          {Object.values(re.ingsEnDB).map((ing,i)=>{
+                            const prod=productos.find(p=>p.id===ing.productoId);
+                            return <div key={i} style={{fontSize:12,color:"#888",display:"flex",justifyContent:"space-between",padding:"2px 0"}}><span>{prod?.nombre}</span><span>{ing.cantidad} {ing.unidad}</span></div>;
+                          })}
+                        </div>
+                      )}
+
+                      {/* Ingredientes NO en DB */}
+                      {(re.ingsExtras||[]).length>0&&(
+                        <div style={{paddingLeft:32}}>
+                          <div style={{fontSize:11,color:"#E8733A",fontWeight:700,marginBottom:4}}>⚠️ No están en inventario</div>
+                          {re.ingsExtras.map((ing,i)=>(
+                            <div key={i} style={{fontSize:12,color:"#888",display:"flex",justifyContent:"space-between",padding:"2px 0"}}><span style={{color:"#E8733A"}}>{ing.nombre}</span><span>{ing.cantidad} {ing.unidad}</span></div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  <div style={{fontSize:11,color:"#555",textAlign:"center"}}>
+                    {iaResultado.filter(r=>r.seleccionada).length} de {iaResultado.length} receta{iaResultado.length>1?"s":""} seleccionada{iaResultado.filter(r=>r.seleccionada).length>1?"s":""}
+                  </div>
 
                   <div style={{display:"flex",gap:8,marginTop:4}}>
                     <button className="ks-btn-sec" style={{flex:1}} onClick={resetIA}>← Volver</button>
-                    <button className="ks-btn-primary" style={{flex:1}} onClick={crearReceta}>Guardar receta</button>
+                    <button className="ks-btn-primary" style={{flex:1,opacity:iaResultado.filter(r=>r.seleccionada).length?1:0.4}}
+                      onClick={guardarRecetasIA}>
+                      Guardar {iaResultado.filter(r=>r.seleccionada).length>1?`${iaResultado.filter(r=>r.seleccionada).length} recetas`:"receta"}
+                    </button>
                   </div>
                 </>
               )}
