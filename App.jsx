@@ -852,18 +852,123 @@ const SK={card:{background:"#161616",border:"1px solid #1e1e1e",borderRadius:10,
 
 // ─── TAB RECETAS ─────────────────────────────────────────────────────────────
 
-function TabRecetas({ resto, yo, esJefe, restoId }) {
-  const [showAdd,setShowAdd]=useState(false);
-  const [detalle,setDetalle]=useState(null);
-  const [nueva,setNueva]=useState({nombre:"",descripcion:"",responsableId:"",productoResultadoId:"",cantidadResultado:"",unidadResultado:"ud",ingredientes:{}});
-  const [ingTmp,setIngTmp]=useState({productoId:"",cantidad:"",unidad:"ud"});
-  const productos=objToArr(resto.productos||{});
-  const recetas=objToArr(resto.recetas||{});
-  const empleados=objToArr(resto.empleados||{});
+// ─── CONSTANTES IA ───────────────────────────────────────────────────────────
+const GEMINI_KEY   = "AIzaSyAJcjO53se5iQH9sqT0noxjohGmr7M65nE";
+const CLD_CLOUD    = "dlqumdwzd";
+const CLD_PRESET   = "ml_default";
 
-  const addIng=()=>{if(!ingTmp.productoId||!ingTmp.cantidad)return;const id=uid();setNueva(p=>({...p,ingredientes:{...p.ingredientes,[id]:{...ingTmp,id}}}));setIngTmp({productoId:"",cantidad:"",unidad:"ud"});};
-  const crearReceta=async()=>{if(!nueva.nombre)return;const id=uid();await dbSet(`restaurantes/${restoId}/recetas/${id}`,{...nueva,id,cantidadResultado:parseFloat(nueva.cantidadResultado)||0});setNueva({nombre:"",descripcion:"",responsableId:"",productoResultadoId:"",cantidadResultado:"",unidadResultado:"ud",ingredientes:{}});setShowAdd(false);};
+async function subirCloudinary(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("upload_preset", CLD_PRESET);
+  const r = await fetch(`https://api.cloudinary.com/v1_1/${CLD_CLOUD}/auto/upload`, { method:"POST", body:fd });
+  const d = await r.json();
+  if (!d.secure_url) throw new Error("Error subiendo archivo");
+  return { url: d.secure_url, tipo: d.resource_type, formato: d.format };
+}
+
+async function extraerRecetaConGemini(file, fileUrl) {
+  // Convertir archivo a base64
+  const toBase64 = f => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(f); });
+  const b64 = await toBase64(file);
+  const mimeType = file.type || "application/pdf";
+
+  const prompt = `Eres un asistente de cocina. Analiza esta receta (imagen o PDF) y extrae la información en JSON con este formato exacto, sin markdown ni texto extra:
+{
+  "nombre": "nombre del plato",
+  "descripcion": "descripción breve del método de elaboración",
+  "ingredientes": [
+    {"nombre": "nombre ingrediente", "cantidad": número, "unidad": "kg|g|L|ml|ud|bote|caja|bolsa|ración"}
+  ]
+}
+Si no encuentras algún campo, usa string vacío o array vacío. Las cantidades deben ser números. Las unidades deben ser una de las listadas.`;
+
+  const body = {
+    contents:[{ parts:[
+      { text: prompt },
+      { inline_data:{ mime_type: mimeType, data: b64 } }
+    ]}],
+    generationConfig:{ temperature:0.1, maxOutputTokens:1000 }
+  };
+
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`, {
+    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)
+  });
+  const d = await r.json();
+  const texto = d.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  // Limpiar posibles markdown backticks
+  const limpio = texto.replace(/```json|```/g,"").trim();
+  return JSON.parse(limpio);
+}
+
+// ─── TAB RECETAS ─────────────────────────────────────────────────────────────
+
+function TabRecetas({ resto, yo, esJefe, restoId }) {
+  const [showAdd,setShowAdd]   = useState(false);
+  const [modoAdd,setModoAdd]   = useState("manual"); // "manual" | "ia"
+  const [detalle,setDetalle]   = useState(null);
+  const [nueva,setNueva]       = useState({nombre:"",descripcion:"",responsableId:"",productoResultadoId:"",cantidadResultado:"",unidadResultado:"ud",ingredientes:{}});
+  const [ingTmp,setIngTmp]     = useState({productoId:"",cantidad:"",unidad:"ud"});
+  // IA
+  const [iaFile,setIaFile]         = useState(null);
+  const [iaPreview,setIaPreview]   = useState(null); // url preview imagen
+  const [iaEstado,setIaEstado]     = useState("idle"); // idle | subiendo | analizando | listo | error
+  const [iaResultado,setIaResultado] = useState(null); // resultado de Gemini
+  const [iaIngExtras,setIaIngExtras] = useState([]); // ingredientes extraídos no en DB
+  const [archivoUrl,setArchivoUrl]   = useState(""); // url cloudinary del archivo
+
+  const productos  = objToArr(resto.productos||{});
+  const recetas    = objToArr(resto.recetas||{});
+  const empleados  = objToArr(resto.empleados||{});
+
+  const addIng=()=>{ if(!ingTmp.productoId||!ingTmp.cantidad)return; const id=uid(); setNueva(p=>({...p,ingredientes:{...p.ingredientes,[id]:{...ingTmp,id}}})); setIngTmp({productoId:"",cantidad:"",unidad:"ud"}); };
+
+  const crearReceta=async()=>{
+    if(!nueva.nombre) return;
+    const id=uid();
+    const datos={...nueva,id,cantidadResultado:parseFloat(nueva.cantidadResultado)||0};
+    if(archivoUrl) datos.archivoUrl=archivoUrl;
+    await dbSet(`restaurantes/${restoId}/recetas/${id}`,datos);
+    setNueva({nombre:"",descripcion:"",responsableId:"",productoResultadoId:"",cantidadResultado:"",unidadResultado:"ud",ingredientes:{}});
+    setArchivoUrl(""); setShowAdd(false);
+  };
+
   const eliminarReceta=async id=>await dbSet(`restaurantes/${restoId}/recetas/${id}`,null);
+
+  // Subir archivo y analizar con Gemini
+  const procesarArchivo=async(file)=>{
+    setIaFile(file); setIaEstado("subiendo"); setIaResultado(null);
+    // Preview si es imagen
+    if(file.type.startsWith("image/")) setIaPreview(URL.createObjectURL(file));
+    else setIaPreview(null);
+    try {
+      // 1. Subir a Cloudinary
+      const {url} = await subirCloudinary(file);
+      setArchivoUrl(url);
+      // 2. Analizar con Gemini
+      setIaEstado("analizando");
+      const resultado = await extraerRecetaConGemini(file, url);
+      setIaResultado(resultado);
+      // 3. Prefill el formulario
+      const ingsObj={};
+      const extras=[];
+      (resultado.ingredientes||[]).forEach(ing=>{
+        const prod=productos.find(p=>p.nombre.toLowerCase()===ing.nombre.toLowerCase());
+        const id=uid();
+        if(prod) ingsObj[id]={id,productoId:prod.id,cantidad:ing.cantidad,unidad:ing.unidad||"ud"};
+        else extras.push({...ing,id,productoId:""});
+      });
+      setIaIngExtras(extras);
+      setNueva(p=>({...p, nombre:resultado.nombre||"", descripcion:resultado.descripcion||"", ingredientes:ingsObj}));
+      setIaEstado("listo");
+    } catch(e) {
+      console.error(e);
+      setIaEstado("error");
+    }
+  };
+
+  const resetIA=()=>{ setIaFile(null); setIaPreview(null); setIaEstado("idle"); setIaResultado(null); setIaIngExtras([]); setArchivoUrl(""); };
+  const resetModal=()=>{ setShowAdd(false); setModoAdd("manual"); resetIA(); setNueva({nombre:"",descripcion:"",responsableId:"",productoResultadoId:"",cantidadResultado:"",unidadResultado:"ud",ingredientes:{}}); };
 
   return (
     <div style={{padding:"14px 14px 8px"}}>
@@ -871,7 +976,9 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
         <div style={{fontSize:15,fontWeight:700,color:"#fff"}}>Recetas</div>
         {esJefe&&<button className="ks-btn-primary" onClick={()=>setShowAdd(true)}>+ Receta</button>}
       </div>
+
       {recetas.length===0&&<div style={{color:"#444",fontSize:14,textAlign:"center",marginTop:40}}>Sin recetas.{esJefe?" Crea la primera →":""}</div>}
+
       {recetas.map(re=>{
         const resp=re.responsableId?empleados.find(e=>e.id===re.responsableId):null;
         const prodRes=re.productoResultadoId?productos.find(p=>p.id===re.productoResultadoId):null;
@@ -886,6 +993,7 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
                 <div style={{display:"flex",gap:8,marginTop:6,flexWrap:"wrap"}}>
                   {resp&&<span style={{fontSize:12,color:"#888"}}>{ROLES[resp.rol]?.icon} {resp.nombre}</span>}
                   {prodRes&&<span style={{fontSize:12,color:"#4EC9A0",background:"#4EC9A011",padding:"2px 8px",borderRadius:99}}>+{re.cantidadResultado} {re.unidadResultado} → {prodRes.nombre}</span>}
+                  {re.archivoUrl&&<a href={re.archivoUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:"#7B6FB0",background:"#7B6FB011",padding:"2px 8px",borderRadius:99,textDecoration:"none"}}>📎 Ver archivo</a>}
                 </div>
               </div>
               <div style={{display:"flex",gap:6}}>
@@ -895,45 +1003,140 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
             </div>
             {isOpen&&(
               <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid #222"}}>
+                {re.archivoUrl&&re.archivoUrl.match(/\.(jpg|jpeg|png|webp)/i)&&(
+                  <img src={re.archivoUrl} alt="receta" style={{width:"100%",borderRadius:8,marginBottom:10,maxHeight:200,objectFit:"cover"}}/>
+                )}
+                <div style={{fontSize:12,fontWeight:700,color:"#888",marginBottom:8,textTransform:"uppercase",letterSpacing:0.5}}>Ingredientes</div>
                 {ings.length===0?<div style={{fontSize:13,color:"#444"}}>Sin ingredientes</div>
-                  :ings.map((ing,i)=>{const prod=productos.find(p=>p.id===ing.productoId);return(<div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #1a1a1a",fontSize:13}}><span style={{color:"#ccc"}}>{prod?.nombre||"—"}</span><span style={{color:"#888"}}>{ing.cantidad} {ing.unidad}</span></div>);})}
+                  :ings.map((ing,i)=>{const prod=productos.find(p=>p.id===ing.productoId);return(<div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #1a1a1a",fontSize:13}}><span style={{color:"#ccc"}}>{prod?.nombre||ing.nombre||"—"}</span><span style={{color:"#888"}}>{ing.cantidad} {ing.unidad}</span></div>);})}
                 {prodRes&&<div style={{marginTop:10,fontSize:13,color:"#4EC9A0",background:"#4EC9A011",padding:"8px 10px",borderRadius:8}}>✅ Al completar → +<b>{re.cantidadResultado} {re.unidadResultado}</b> de <b>{prodRes.nombre}</b></div>}
               </div>
             )}
           </div>
         );
       })}
+
       {showAdd&&(
-        <Modal titulo="Nueva receta" onClose={()=>setShowAdd(false)}>
-          <label className="ks-label">Nombre</label>
-          <input className="ks-input" placeholder="Ej: Fondo de pollo" value={nueva.nombre} onChange={e=>setNueva(p=>({...p,nombre:e.target.value}))} autoFocus/>
-          <label className="ks-label">Descripción</label>
-          <input className="ks-input" placeholder="Notas de elaboración..." value={nueva.descripcion} onChange={e=>setNueva(p=>({...p,descripcion:e.target.value}))}/>
-          <label className="ks-label">Responsable</label>
-          <select className="ks-input" value={nueva.responsableId} onChange={e=>setNueva(p=>({...p,responsableId:e.target.value}))}>
-            <option value="">— Sin asignar —</option>
-            {empleados.map(e=><option key={e.id} value={e.id}>{ROLES[e.rol]?.icon} {e.nombre}</option>)}
-          </select>
-          <div style={{fontSize:13,fontWeight:600,color:"#888",marginTop:4}}>Ingredientes</div>
-          {objToArr(nueva.ingredientes).map((ing,i)=>{const prod=productos.find(p=>p.id===ing.productoId);return(<div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"#ccc",padding:"4px 0",borderBottom:"1px solid #1a1a1a"}}><span>{prod?.nombre}</span><span>{ing.cantidad} {ing.unidad}</span></div>);})}
-          <div style={{display:"flex",gap:6}}>
-            <select className="ks-input" style={{flex:2}} value={ingTmp.productoId} onChange={e=>setIngTmp(p=>({...p,productoId:e.target.value}))}><option value="">Producto...</option>{productos.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}</select>
-            <input className="ks-input" style={{flex:1,minWidth:50}} type="number" placeholder="Cant." min="0" step="0.1" value={ingTmp.cantidad} onChange={e=>setIngTmp(p=>({...p,cantidad:e.target.value}))}/>
-            <select className="ks-input" style={{flex:1}} value={ingTmp.unidad} onChange={e=>setIngTmp(p=>({...p,unidad:e.target.value}))}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select>
-            <button className="ks-btn-primary" style={{padding:"0 12px"}} onClick={addIng}>+</button>
+        <Modal titulo="Nueva receta" onClose={resetModal}>
+          {/* Tabs manual / IA */}
+          <div style={{display:"flex",background:"#111",borderRadius:10,padding:3,gap:3}}>
+            {[["manual","✏️ Manual"],["ia","🤖 Subir foto/PDF"]].map(([m,l])=>(
+              <button key={m} onClick={()=>{setModoAdd(m);resetIA();}} style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:modoAdd===m?"#222":"transparent",color:modoAdd===m?"#fff":"#555",fontSize:13,cursor:"pointer",fontWeight:600,fontFamily:"'DM Sans',sans-serif"}}>{l}</button>
+            ))}
           </div>
-          <div style={{fontSize:13,fontWeight:600,color:"#888",marginTop:4}}>Producto que genera al completar</div>
-          <select className="ks-input" value={nueva.productoResultadoId} onChange={e=>setNueva(p=>({...p,productoResultadoId:e.target.value}))}><option value="">— Ninguno —</option>{productos.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}</select>
-          {nueva.productoResultadoId&&(
-            <div style={{display:"flex",gap:8}}>
-              <div style={{flex:1}}><label className="ks-label">Cantidad</label><input className="ks-input" type="number" min="0" step="0.1" placeholder="0" value={nueva.cantidadResultado} onChange={e=>setNueva(p=>({...p,cantidadResultado:e.target.value}))}/></div>
-              <div style={{flex:1}}><label className="ks-label">Unidad</label><select className="ks-input" value={nueva.unidadResultado} onChange={e=>setNueva(p=>({...p,unidadResultado:e.target.value}))}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select></div>
-            </div>
+
+          {/* MODO IA */}
+          {modoAdd==="ia"&&(
+            <>
+              {iaEstado==="idle"&&(
+                <label style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"24px 16px",border:"2px dashed #2a2a2a",borderRadius:12,cursor:"pointer",background:"#111"}}>
+                  <span style={{fontSize:36}}>📸</span>
+                  <span style={{fontSize:14,color:"#888",textAlign:"center"}}>Sube una foto o PDF de la receta<br/><span style={{fontSize:12,color:"#555"}}>y la IA extraerá los ingredientes</span></span>
+                  <input type="file" accept="image/*,.pdf" style={{display:"none"}} onChange={e=>{ if(e.target.files[0]) procesarArchivo(e.target.files[0]); }}/>
+                  <span style={{background:"#E8733A",color:"#fff",padding:"8px 20px",borderRadius:10,fontSize:13,fontWeight:700}}>Elegir archivo</span>
+                </label>
+              )}
+
+              {(iaEstado==="subiendo"||iaEstado==="analizando")&&(
+                <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:12,padding:"24px 0"}}>
+                  <div className="ks-spinner"/>
+                  <div style={{fontSize:13,color:"#888"}}>{iaEstado==="subiendo"?"Subiendo archivo...":"Analizando con IA..."}</div>
+                </div>
+              )}
+
+              {iaEstado==="error"&&(
+                <div style={{textAlign:"center",padding:"16px 0"}}>
+                  <div style={{fontSize:14,color:"#e05555",marginBottom:12}}>❌ No se pudo leer la receta</div>
+                  <button className="ks-btn-sec" onClick={resetIA}>Intentar de nuevo</button>
+                </div>
+              )}
+
+              {iaEstado==="listo"&&iaResultado&&(
+                <>
+                  <div style={{background:"#4EC9A011",border:"1px solid #4EC9A044",borderRadius:10,padding:"10px 14px",fontSize:13,color:"#4EC9A0"}}>
+                    ✅ Receta detectada — revisa y ajusta antes de guardar
+                  </div>
+                  {iaPreview&&<img src={iaPreview} alt="preview" style={{width:"100%",borderRadius:8,maxHeight:150,objectFit:"cover"}}/>}
+
+                  <label className="ks-label">Nombre</label>
+                  <input className="ks-input" value={nueva.nombre} onChange={e=>setNueva(p=>({...p,nombre:e.target.value}))}/>
+                  <label className="ks-label">Descripción</label>
+                  <input className="ks-input" value={nueva.descripcion} onChange={e=>setNueva(p=>({...p,descripcion:e.target.value}))}/>
+
+                  {/* Ingredientes detectados en DB */}
+                  {objToArr(nueva.ingredientes).length>0&&(
+                    <>
+                      <div style={{fontSize:12,fontWeight:700,color:"#4EC9A0",textTransform:"uppercase",letterSpacing:0.5}}>✅ Encontrados en stock</div>
+                      {objToArr(nueva.ingredientes).map((ing,i)=>{
+                        const prod=productos.find(p=>p.id===ing.productoId);
+                        return (<div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #1a1a1a",fontSize:13}}><span style={{color:"#ccc"}}>{prod?.nombre}</span><span style={{color:"#888"}}>{ing.cantidad} {ing.unidad}</span></div>);
+                      })}
+                    </>
+                  )}
+
+                  {/* Ingredientes NO encontrados en DB */}
+                  {iaIngExtras.length>0&&(
+                    <>
+                      <div style={{fontSize:12,fontWeight:700,color:"#E8733A",textTransform:"uppercase",letterSpacing:0.5}}>⚠️ No están en tu inventario</div>
+                      <div style={{fontSize:11,color:"#666"}}>Estos ingredientes no están en tu stock. Puedes añadirlos desde la pestaña Stock.</div>
+                      {iaIngExtras.map((ing,i)=>(
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #1a1a1a",fontSize:13}}>
+                          <span style={{color:"#E8733A"}}>{ing.nombre}</span>
+                          <span style={{color:"#888"}}>{ing.cantidad} {ing.unidad}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+
+                  <label className="ks-label">Responsable</label>
+                  <select className="ks-input" value={nueva.responsableId} onChange={e=>setNueva(p=>({...p,responsableId:e.target.value}))}>
+                    <option value="">— Sin asignar —</option>
+                    {empleados.map(e=><option key={e.id} value={e.id}>{ROLES[e.rol]?.icon} {e.nombre}</option>)}
+                  </select>
+
+                  <div style={{display:"flex",gap:8,marginTop:4}}>
+                    <button className="ks-btn-sec" style={{flex:1}} onClick={resetIA}>← Volver</button>
+                    <button className="ks-btn-primary" style={{flex:1}} onClick={crearReceta}>Guardar receta</button>
+                  </div>
+                </>
+              )}
+            </>
           )}
-          <div style={{display:"flex",gap:8,marginTop:8}}>
-            <button className="ks-btn-sec" style={{flex:1}} onClick={()=>setShowAdd(false)}>Cancelar</button>
-            <button className="ks-btn-primary" style={{flex:1}} onClick={crearReceta}>Guardar</button>
-          </div>
+
+          {/* MODO MANUAL */}
+          {modoAdd==="manual"&&(
+            <>
+              <label className="ks-label">Nombre</label>
+              <input className="ks-input" placeholder="Ej: Fondo de pollo" value={nueva.nombre} onChange={e=>setNueva(p=>({...p,nombre:e.target.value}))} autoFocus/>
+              <label className="ks-label">Descripción</label>
+              <input className="ks-input" placeholder="Notas de elaboración..." value={nueva.descripcion} onChange={e=>setNueva(p=>({...p,descripcion:e.target.value}))}/>
+              <label className="ks-label">Responsable</label>
+              <select className="ks-input" value={nueva.responsableId} onChange={e=>setNueva(p=>({...p,responsableId:e.target.value}))}>
+                <option value="">— Sin asignar —</option>
+                {empleados.map(e=><option key={e.id} value={e.id}>{ROLES[e.rol]?.icon} {e.nombre}</option>)}
+              </select>
+              <div style={{fontSize:13,fontWeight:600,color:"#888",marginTop:4}}>Ingredientes</div>
+              {objToArr(nueva.ingredientes).map((ing,i)=>{const prod=productos.find(p=>p.id===ing.productoId);return(<div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"#ccc",padding:"4px 0",borderBottom:"1px solid #1a1a1a"}}><span>{prod?.nombre}</span><span>{ing.cantidad} {ing.unidad}</span></div>);})}
+              <div style={{display:"flex",gap:6}}>
+                <select className="ks-input" style={{flex:2}} value={ingTmp.productoId} onChange={e=>setIngTmp(p=>({...p,productoId:e.target.value}))}><option value="">Producto...</option>{productos.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}</select>
+                <input className="ks-input" style={{flex:1,minWidth:50}} type="number" placeholder="Cant." min="0" step="0.1" value={ingTmp.cantidad} onChange={e=>setIngTmp(p=>({...p,cantidad:e.target.value}))}/>
+                <select className="ks-input" style={{flex:1}} value={ingTmp.unidad} onChange={e=>setIngTmp(p=>({...p,unidad:e.target.value}))}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select>
+                <button className="ks-btn-primary" style={{padding:"0 12px"}} onClick={addIng}>+</button>
+              </div>
+              <div style={{fontSize:13,fontWeight:600,color:"#888",marginTop:4}}>Producto que genera al completar</div>
+              <select className="ks-input" value={nueva.productoResultadoId} onChange={e=>setNueva(p=>({...p,productoResultadoId:e.target.value}))}><option value="">— Ninguno —</option>{productos.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}</select>
+              {nueva.productoResultadoId&&(
+                <div style={{display:"flex",gap:8}}>
+                  <div style={{flex:1}}><label className="ks-label">Cantidad</label><input className="ks-input" type="number" min="0" step="0.1" placeholder="0" value={nueva.cantidadResultado} onChange={e=>setNueva(p=>({...p,cantidadResultado:e.target.value}))}/></div>
+                  <div style={{flex:1}}><label className="ks-label">Unidad</label><select className="ks-input" value={nueva.unidadResultado} onChange={e=>setNueva(p=>({...p,unidadResultado:e.target.value}))}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select></div>
+                </div>
+              )}
+              <div style={{display:"flex",gap:8,marginTop:8}}>
+                <button className="ks-btn-sec" style={{flex:1}} onClick={resetModal}>Cancelar</button>
+                <button className="ks-btn-primary" style={{flex:1}} onClick={crearReceta}>Guardar</button>
+              </div>
+            </>
+          )}
         </Modal>
       )}
     </div>
