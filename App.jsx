@@ -904,9 +904,9 @@ Reglas importantes:
   };
 
   const modelos = [
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-pro-vision",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-001",
   ];
 
   let texto = "";
