@@ -996,8 +996,31 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
     resetModal();
   };
 
-  const resetIA=()=>{ setIaFile(null); setIaPreview(null); setIaEstado("idle"); setIaResultado(null); setIaIngExtras([]); setArchivoUrl(""); };
-  const resetModal=()=>{ setShowAdd(false); setModoAdd("manual"); resetIA(); setNueva({nombre:"",descripcion:"",responsableId:"",productoResultadoId:"",cantidadResultado:"",unidadResultado:"ud",ingredientes:{}}); };
+  const [editando, setEditando] = useState(null); // receta completa siendo editada
+
+  const abrirEditar = (re) => {
+    setEditando({ ...re, ingredientes: re.ingredientes||{}, cantidadResultado: re.cantidadResultado||0 });
+  };
+
+  const guardarEdicion = async () => {
+    if(!editando?.nombre) return;
+    await dbSet(`restaurantes/${restoId}/recetas/${editando.id}`, {
+      ...editando,
+      cantidadResultado: parseFloat(editando.cantidadResultado)||0,
+    });
+    setEditando(null);
+  };
+
+  const editIngAdd = () => {
+    if(!ingTmp.productoId||!ingTmp.cantidad) return;
+    const id=uid();
+    setEditando(p=>({...p, ingredientes:{...p.ingredientes,[id]:{...ingTmp,id}}}));
+    setIngTmp({productoId:"",cantidad:"",unidad:"ud"});
+  };
+
+  const editIngRemove = (id) => {
+    setEditando(p=>{ const ings={...p.ingredientes}; delete ings[id]; return {...p,ingredientes:ings}; });
+  };
 
   return (
     <div style={{padding:"14px 14px 8px"}}>
@@ -1027,6 +1050,7 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
               </div>
               <div style={{display:"flex",gap:6}}>
                 <button className="ks-chip" onClick={()=>setDetalle(isOpen?null:re.id)}>{isOpen?"Cerrar":"Ver"}</button>
+                {esJefe&&<button className="ks-chip" style={{color:"#D4A017",borderColor:"#D4A01744"}} onClick={()=>abrirEditar(re)}>✏️</button>}
                 {esJefe&&<button className="ks-del" onClick={()=>eliminarReceta(re.id)}>✕</button>}
               </div>
             </div>
@@ -1177,6 +1201,59 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
               </div>
             </>
           )}
+        </Modal>
+      )}
+
+      {/* MODAL EDITAR RECETA */}
+      {editando&&(
+        <Modal titulo={`Editar — ${editando.nombre}`} onClose={()=>setEditando(null)}>
+          <label className="ks-label">Nombre</label>
+          <input className="ks-input" value={editando.nombre} onChange={e=>setEditando(p=>({...p,nombre:e.target.value}))} autoFocus/>
+          <label className="ks-label">Descripción</label>
+          <input className="ks-input" placeholder="Notas de elaboración..." value={editando.descripcion||""} onChange={e=>setEditando(p=>({...p,descripcion:e.target.value}))}/>
+          <label className="ks-label">Responsable</label>
+          <select className="ks-input" value={editando.responsableId||""} onChange={e=>setEditando(p=>({...p,responsableId:e.target.value}))}>
+            <option value="">— Sin asignar —</option>
+            {empleados.map(e=><option key={e.id} value={e.id}>{ROLES[e.rol]?.icon} {e.nombre}</option>)}
+          </select>
+
+          <div style={{fontSize:13,fontWeight:600,color:"#888",marginTop:4}}>Ingredientes</div>
+          {objToArr(editando.ingredientes).map((ing)=>{
+            const prod=productos.find(p=>p.id===ing.productoId);
+            return (
+              <div key={ing.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:13,color:"#ccc",padding:"4px 0",borderBottom:"1px solid #1a1a1a"}}>
+                <span style={{flex:1}}>{prod?.nombre||"—"}</span>
+                <span style={{color:"#888",marginRight:8}}>{ing.cantidad} {ing.unidad}</span>
+                <button className="ks-del" onClick={()=>editIngRemove(ing.id)}>✕</button>
+              </div>
+            );
+          })}
+          <div style={{display:"flex",gap:6}}>
+            <select className="ks-input" style={{flex:2}} value={ingTmp.productoId} onChange={e=>setIngTmp(p=>({...p,productoId:e.target.value}))}>
+              <option value="">Producto...</option>
+              {productos.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+            </select>
+            <input className="ks-input" style={{flex:1,minWidth:50}} type="number" placeholder="Cant." min="0" step="0.1" value={ingTmp.cantidad} onChange={e=>setIngTmp(p=>({...p,cantidad:e.target.value}))}/>
+            <select className="ks-input" style={{flex:1}} value={ingTmp.unidad} onChange={e=>setIngTmp(p=>({...p,unidad:e.target.value}))}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select>
+            <button className="ks-btn-primary" style={{padding:"0 12px"}} onClick={editIngAdd}>+</button>
+          </div>
+
+          <div style={{fontSize:13,fontWeight:600,color:"#888",marginTop:4}}>Producto que genera al completar</div>
+          <select className="ks-input" value={editando.productoResultadoId||""} onChange={e=>setEditando(p=>({...p,productoResultadoId:e.target.value}))}>
+            <option value="">— Ninguno —</option>
+            {productos.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+          </select>
+          {editando.productoResultadoId&&(
+            <div style={{display:"flex",gap:8}}>
+              <div style={{flex:1}}><label className="ks-label">Cantidad</label><input className="ks-input" type="number" min="0" step="0.1" value={editando.cantidadResultado||""} onChange={e=>setEditando(p=>({...p,cantidadResultado:e.target.value}))}/></div>
+              <div style={{flex:1}}><label className="ks-label">Unidad</label><select className="ks-input" value={editando.unidadResultado||"ud"} onChange={e=>setEditando(p=>({...p,unidadResultado:e.target.value}))}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select></div>
+            </div>
+          )}
+
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <button className="ks-btn-sec" style={{flex:1}} onClick={()=>setEditando(null)}>Cancelar</button>
+            <button className="ks-btn-primary" style={{flex:1}} onClick={guardarEdicion}>Guardar cambios</button>
+          </div>
         </Modal>
       )}
     </div>
