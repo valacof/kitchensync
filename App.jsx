@@ -903,17 +903,34 @@ Reglas importantes:
     generationConfig:{ temperature:0.1, maxOutputTokens:4000 }
   };
 
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`, {
-    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)
-  });
-  const d = await r.json();
-  const texto = d.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const modelos = [
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-pro-vision",
+  ];
+
+  let texto = "";
+  let ultimoError = null;
+
+  for (const modelo of modelos) {
+    try {
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${GEMINI_KEY}`;
+      const resp = await fetch(endpoint, {
+        method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)
+      });
+      if (!resp.ok) { ultimoError = `${modelo}: ${resp.status}`; continue; }
+      const d = await resp.json();
+      texto = d.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      if (texto) break;
+    } catch(e) { ultimoError = e.message; continue; }
+  }
+
+  if (!texto) throw new Error("No se pudo conectar con Gemini: " + ultimoError);
   const limpio = texto.replace(/```json|```/g,"").trim();
   const parsed = JSON.parse(limpio);
-  // Normalizar: si devuelve objeto con "recetas" o directamente un array
   if(parsed.recetas) return parsed.recetas;
   if(Array.isArray(parsed)) return parsed;
-  return [parsed]; // una sola receta sin wrapper
+  return [parsed];
 }
 
 // ─── TAB RECETAS ─────────────────────────────────────────────────────────────
