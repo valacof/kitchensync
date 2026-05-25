@@ -950,6 +950,9 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
 
   const eliminarReceta=async id=>await dbSet(`restaurantes/${restoId}/recetas/${id}`,null);
 
+  const resetIA=()=>{ setIaFile(null); setIaPreview(null); setIaEstado("idle"); setIaResultado(null); setIaIngExtras([]); setArchivoUrl(""); };
+  const resetModal=()=>{ setShowAdd(false); setModoAdd("manual"); resetIA(); setNueva({nombre:"",descripcion:"",responsableId:"",productoResultadoId:"",cantidadResultado:"",unidadResultado:"ud",ingredientes:{}}); };
+
   // Subir archivo y analizar con Gemini
   const procesarArchivo=async(file)=>{
     setIaFile(file); setIaEstado("subiendo"); setIaResultado(null);
