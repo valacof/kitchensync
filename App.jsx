@@ -926,8 +926,27 @@ Reglas importantes:
   }
 
   if (!texto) throw new Error("No se pudo conectar con Gemini: " + ultimoError);
-  const limpio = texto.replace(/```json|```/g,"").trim();
-  const parsed = JSON.parse(limpio);
+  // Extraer JSON de forma robusta — Gemini a veces añade texto antes/después
+  let jsonStr = texto;
+  // Buscar primer { o [ y último } o ]
+  const firstBrace = texto.indexOf("{");
+  const firstBracket = texto.indexOf("[");
+  let start = -1;
+  if (firstBrace !== -1 && firstBracket !== -1) start = Math.min(firstBrace, firstBracket);
+  else if (firstBrace !== -1) start = firstBrace;
+  else if (firstBracket !== -1) start = firstBracket;
+
+  if (start !== -1) {
+    const lastBrace   = texto.lastIndexOf("}");
+    const lastBracket = texto.lastIndexOf("]");
+    const end = Math.max(lastBrace, lastBracket);
+    if (end > start) jsonStr = texto.slice(start, end + 1);
+  }
+
+  // Limpiar markdown si quedó
+  jsonStr = jsonStr.replace(/```json|```/g,"").trim();
+
+  const parsed = JSON.parse(jsonStr);
   if(parsed.recetas) return parsed.recetas;
   if(Array.isArray(parsed)) return parsed;
   return [parsed];
