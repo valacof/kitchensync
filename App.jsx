@@ -853,7 +853,7 @@ const SK={card:{background:"#161616",border:"1px solid #1e1e1e",borderRadius:10,
 // ─── TAB RECETAS ─────────────────────────────────────────────────────────────
 
 // ─── CONSTANTES IA ───────────────────────────────────────────────────────────
-const GEMINI_KEY   = "AIzaSyAJcjO53se5iQH9sqT0noxjohGmr7M65nE";
+const GEMINI_KEY   = import.meta.env.VITE_GEMINI_KEY || "";
 const CLD_CLOUD    = "dlqumdwzd";
 const CLD_PRESET   = "ml_default";
 
