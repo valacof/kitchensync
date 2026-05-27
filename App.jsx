@@ -117,7 +117,7 @@ async function fbMultiUpdate(updates) {
 async function checkStockAlertas(restoId, productos, recetas, empleados, tareas) {
   const updates = {};
   for (const p of productos) {
-    if (p.stock < p.minStock) {
+    if (p.minStock > 0 && p.stock < p.minStock) {
       const comprasSnap = await dbGet(`restaurantes/${restoId}/compras`);
       const comprasArr = objToArr(comprasSnap || {});
       const yaEnCompras = comprasArr.find(c => !c.hecho && c.productoId === p.id);
@@ -690,13 +690,13 @@ function TabStock({ resto, yo, esJefe, restoId }) {
   const [busqueda,setBusqueda]=useState("");
   const [selCat,setSelCat]=useState("Todas");
   const [nuevo,setNuevo]=useState({nombre:"",stock:"",minStock:"",unidad:"ud",categoria:"",proveedorId:""});
-  const [sel,setSel]=useState([]); // array de {nombre, unidad} para poder editar la unidad
+  const [sel,setSel]=useState([]);
+  const [editProd,setEditProd]=useState(null); // producto siendo editado
   const productos=objToArr(resto.productos||{});
   const proveedores=objToArr(resto.proveedores||{});
   const recetas=objToArr(resto.recetas||{});
   const empleados=objToArr(resto.empleados||{});
 
-  // Bug fix 2: stock y minStock pueden ser 0, solo bloquear si nombre está vacío
   const agregarProducto=async()=>{
     if(!nuevo.nombre.trim()) return;
     const id=uid();
@@ -709,7 +709,6 @@ function TabStock({ resto, yo, esJefe, restoId }) {
     setNuevo({nombre:"",stock:"",minStock:"",unidad:"ud",categoria:"",proveedorId:""}); setShowAdd(false);
   };
 
-  // Bug fix 1: usar la unidad editada por el usuario, no la del catálogo fijo
   const agregarDesdeCatalogo=async()=>{
     if(!sel.length) return;
     const updates={};
@@ -722,9 +721,25 @@ function TabStock({ resto, yo, esJefe, restoId }) {
     setSel([]); setShowAdd(false); setBusqueda("");
   };
 
-  // Cambiar unidad de un item seleccionado del catálogo
   const cambiarUnidadSel=(nombre,unidad)=>{
     setSel(prev=>prev.map(item=>item.nombre===nombre?{...item,unidad}:item));
+  };
+
+  // Guardar edición completa de producto (stock, minStock, unidad, proveedor)
+  const guardarEdicionProd=async()=>{
+    if(!editProd) return;
+    const updates={
+      [`restaurantes/${restoId}/productos/${editProd.id}/stock`]: parseFloat(editProd.stock)||0,
+      [`restaurantes/${restoId}/productos/${editProd.id}/minStock`]: parseFloat(editProd.minStock)||0,
+      [`restaurantes/${restoId}/productos/${editProd.id}/unidad`]: editProd.unidad,
+      [`restaurantes/${restoId}/productos/${editProd.id}/proveedorId`]: editProd.proveedorId||null,
+      [`restaurantes/${restoId}/productos/${editProd.id}/categoria`]: editProd.categoria||"General",
+    };
+    await fbMultiUpdate(updates);
+    // Comprobar alarmas con los valores nuevos
+    const prodActualizado=productos.map(p=>p.id===editProd.id?{...p,...editProd}:p);
+    await checkStockAlertas(restoId,prodActualizado,recetas,empleados,resto.tareas);
+    setEditProd(null);
   };
 
   const ajustarStock=async(id,delta)=>{
@@ -761,11 +776,18 @@ function TabStock({ resto, yo, esJefe, restoId }) {
             return (
               <div key={p.id} style={{...SK.card,borderColor:bajo?"#E8733A44":"#1e1e1e"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <div><div style={{fontSize:14,fontWeight:600,color:bajo?"#E8733A":"#eee"}}>{p.nombre}</div><div style={{fontSize:12,color:"#555",marginTop:2}}>Mín: {p.minStock} {p.unidad}</div></div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:14,fontWeight:600,color:bajo?"#E8733A":"#eee"}}>{p.nombre}</div>
+                    <div style={{fontSize:12,color:"#555",marginTop:2}}>
+                      Mín: {p.minStock} {p.unidad}
+                      {p.proveedorId&&<span style={{color:"#7B6FB0",marginLeft:8}}>· {proveedores.find(pv=>pv.id===p.proveedorId)?.nombre}</span>}
+                    </div>
+                  </div>
                   <div style={{display:"flex",alignItems:"center",gap:6}}>
                     {esJefe&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,-1)}>−</button>}
                     <span style={{fontSize:15,fontWeight:700,color:bajo?"#E8733A":"#fff",minWidth:60,textAlign:"center"}}>{fmt(p.stock)} {p.unidad}</span>
                     {esJefe&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,1)}>+</button>}
+                    {esJefe&&<button className="ks-chip" style={{fontSize:12,padding:"3px 8px",color:"#D4A017",borderColor:"#D4A01744"}} onClick={()=>setEditProd({...p})}>✏️</button>}
                     {esJefe&&<button className="ks-del" onClick={()=>eliminar(p.id)}>✕</button>}
                   </div>
                 </div>
@@ -845,6 +867,38 @@ function TabStock({ resto, yo, esJefe, restoId }) {
           )}
         </Modal>
       )}
+      {editProd&&(
+        <Modal titulo={`Editar — ${editProd.nombre}`} onClose={()=>setEditProd(null)}>
+          <div style={{display:"flex",gap:8}}>
+            <div style={{flex:1}}>
+              <label className="ks-label">Stock actual</label>
+              <input className="ks-input" type="number" min="0" step="0.1" value={editProd.stock}
+                onChange={e=>setEditProd(p=>({...p,stock:e.target.value}))}/>
+            </div>
+            <div style={{flex:1}}>
+              <label className="ks-label">Stock mínimo</label>
+              <input className="ks-input" type="number" min="0" step="0.1" value={editProd.minStock}
+                onChange={e=>setEditProd(p=>({...p,minStock:e.target.value}))}/>
+            </div>
+          </div>
+          <label className="ks-label">Unidad</label>
+          <select className="ks-input" value={editProd.unidad} onChange={e=>setEditProd(p=>({...p,unidad:e.target.value}))}>
+            {UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}
+          </select>
+          <label className="ks-label">Categoría</label>
+          <input className="ks-input" placeholder="Ej: Carnes, Caldos..." value={editProd.categoria||""}
+            onChange={e=>setEditProd(p=>({...p,categoria:e.target.value}))}/>
+          <label className="ks-label">Proveedor</label>
+          <select className="ks-input" value={editProd.proveedorId||""} onChange={e=>setEditProd(p=>({...p,proveedorId:e.target.value||null}))}>
+            <option value="">— Sin proveedor —</option>
+            {proveedores.map(pv=><option key={pv.id} value={pv.id}>{pv.nombre}</option>)}
+          </select>
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <button className="ks-btn-sec" style={{flex:1}} onClick={()=>setEditProd(null)}>Cancelar</button>
+            <button className="ks-btn-primary" style={{flex:1}} onClick={guardarEdicionProd}>Guardar</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -900,7 +954,7 @@ Reglas importantes:
       { text: prompt },
       { inline_data:{ mime_type: mimeType, data: b64 } }
     ]}],
-    generationConfig:{ temperature:0.1, maxOutputTokens:4000 }
+    generationConfig:{ temperature:0.1, maxOutputTokens:8000 }
   };
 
   const modelos = [
