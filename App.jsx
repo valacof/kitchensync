@@ -691,7 +691,34 @@ function TabStock({ resto, yo, esJefe, restoId }) {
   const [selCat,setSelCat]=useState("Todas");
   const [nuevo,setNuevo]=useState({nombre:"",stock:"",minStock:"",unidad:"ud",categoria:"",proveedorId:""});
   const [sel,setSel]=useState([]);
-  const [editProd,setEditProd]=useState(null); // producto siendo editado
+  const [editProd,setEditProd]=useState(null);
+  const [solicProd,setSolicProd]=useState(null); // solicitar preparación de un producto
+
+  const enviarSolicitudMateria=async(prod, texto)=>{
+    if(!texto.trim()) return;
+    // Buscar receta vinculada a este producto como resultado
+    const recetaVinculada=recetas.find(re=>re.productoResultadoId===prod.id);
+    const responsableId=recetaVinculada?.responsableId||null;
+    const nId=uid();
+    const updates={};
+    updates[`restaurantes/${restoId}/notificaciones/${nId}`]={
+      id:nId,
+      texto:`🧑‍🍳 ${yo.nombre} solicita preparar "${prod.nombre}": "${texto}"${responsableId?` → asignado a ${empleados.find(e=>e.id===responsableId)?.nombre||"responsable"}`:""}`,
+      tipo:"alerta", ts:Date.now(), leida:false
+    };
+    // Si hay receta vinculada con responsable, crear tarea automáticamente
+    if(recetaVinculada && responsableId){
+      const tId=uid();
+      updates[`restaurantes/${restoId}/tareas/${tId}`]={
+        id:tId, nombre:`Preparar: ${prod.nombre} (solicitado por ${yo.nombre})`,
+        cat:"produccion", prioridad:"alta", asignado:responsableId,
+        completado:false, creadoPor:yo.id, recetaId:recetaVinculada.id,
+        solicitudes:{}, ts:Date.now()
+      };
+    }
+    await fbMultiUpdate(updates);
+    setSolicProd(null);
+  };
   const productos=objToArr(resto.productos||{});
   const proveedores=objToArr(resto.proveedores||{});
   const recetas=objToArr(resto.recetas||{});
@@ -788,6 +815,9 @@ function TabStock({ resto, yo, esJefe, restoId }) {
                     <span style={{fontSize:15,fontWeight:700,color:bajo?"#E8733A":"#fff",minWidth:60,textAlign:"center"}}>{fmt(p.stock)} {p.unidad}</span>
                     {esJefe&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,1)}>+</button>}
                     {esJefe&&<button className="ks-chip" style={{fontSize:12,padding:"3px 8px",color:"#D4A017",borderColor:"#D4A01744"}} onClick={()=>setEditProd({...p})}>✏️</button>}
+                    {!esJefe&&recetas.find(re=>re.productoResultadoId===p.id)&&(
+                      <button className="ks-solic-btn" onClick={()=>setSolicProd(p)}>Solicitar</button>
+                    )}
                     {esJefe&&<button className="ks-del" onClick={()=>eliminar(p.id)}>✕</button>}
                   </div>
                 </div>
@@ -899,14 +929,51 @@ function TabStock({ resto, yo, esJefe, restoId }) {
           </div>
         </Modal>
       )}
+
+      {solicProd&&(
+        <Modal titulo={`Solicitar preparación`} onClose={()=>setSolicProd(null)}>
+          <div style={{fontSize:14,fontWeight:700,color:"#fff",marginBottom:4}}>{solicProd.nombre}</div>
+          <div style={{fontSize:12,color:"#666",marginBottom:10}}>
+            {recetas.find(re=>re.productoResultadoId===solicProd.id)
+              ? `Responsable: ${empleados.find(e=>e.id===recetas.find(re=>re.productoResultadoId===solicProd.id)?.responsableId)?.nombre||"Sin asignar"}`
+              : "Sin receta vinculada — se enviará notificación al equipo"}
+          </div>
+          <label className="ks-label">¿Cuánto necesitas? (opcional)</label>
+          <SolicitudMateriaInput prod={solicProd} onEnviar={(txt)=>enviarSolicitudMateria(solicProd,txt)} onClose={()=>setSolicProd(null)}/>
+        </Modal>
+      )}
     </div>
   );
 }
 const SK={card:{background:"#161616",border:"1px solid #1e1e1e",borderRadius:10,padding:"12px 14px",marginBottom:8}};
 
-// ─── TAB RECETAS ─────────────────────────────────────────────────────────────
-
-// ─── CONSTANTES IA ───────────────────────────────────────────────────────────
+function SolicitudMateriaInput({ prod, onEnviar, onClose }) {
+  const [texto, setTexto] = useState("");
+  const sugerencias = [
+    `Necesito más ${prod.nombre}`,
+    `Urgente — sin stock de ${prod.nombre}`,
+    "Para el servicio de hoy",
+    "Para mañana",
+  ];
+  return (
+    <>
+      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
+        {sugerencias.map(s=>(
+          <button key={s} className="ks-chip" onClick={()=>setTexto(s)}>{s}</button>
+        ))}
+      </div>
+      <textarea className="ks-input" rows={2} placeholder="O escribe tu mensaje..."
+        value={texto} onChange={e=>setTexto(e.target.value)}
+        style={{resize:"none",fontFamily:"inherit"}}/>
+      <div style={{display:"flex",gap:8,marginTop:8}}>
+        <button className="ks-btn-sec" style={{flex:1}} onClick={onClose}>Cancelar</button>
+        <button className="ks-btn-primary" style={{flex:1}} onClick={()=>onEnviar(texto||`Necesito más ${prod.nombre}`)}>
+          Enviar solicitud
+        </button>
+      </div>
+    </>
+  );
+}
 const GEMINI_KEY   = import.meta.env.VITE_GEMINI_KEY || "";
 const CLD_CLOUD    = "dlqumdwzd";
 const CLD_PRESET   = "ml_default";
@@ -926,43 +993,34 @@ async function extraerRecetaConGemini(file, fileUrl) {
   const b64 = await toBase64(file);
   const mimeType = file.type || "application/pdf";
 
-  const prompt = `Eres un asistente de cocina profesional. Analiza este documento (puede ser una imagen o PDF con una o varias recetas) y extrae TODAS las recetas que encuentres.
+  const prompt = `Eres un asistente de cocina profesional experto en leer recetas. Analiza este documento con MUCHO CUIDADO — puede ser una imagen, foto de receta escrita a mano, o PDF con una o varias páginas con recetas.
 
-Devuelve ÚNICAMENTE un JSON válido con este formato exacto, sin markdown, sin texto extra, sin explicaciones:
-{
-  "recetas": [
-    {
-      "nombre": "nombre del plato",
-      "descripcion": "descripción breve del método de elaboración",
-      "ingredientes": [
-        {"nombre": "nombre ingrediente", "cantidad": número, "unidad": "kg|g|L|ml|ud|bote|caja|bolsa|ración"}
-      ]
-    }
-  ]
-}
+INSTRUCCIONES IMPORTANTES:
+- Si el texto está escrito a mano, intenta leerlo con la mayor precisión posible
+- Busca TODAS las recetas que haya en el documento, aunque estén en páginas diferentes
+- Cada receta tiene un nombre, una lista de ingredientes con cantidades, y a veces instrucciones
 
-Reglas importantes:
-- Si solo hay una receta, el array "recetas" tendrá un solo elemento
-- Si hay varias recetas, inclúyelas todas en el array
-- Las cantidades deben ser números (no texto)
-- Si no puedes determinar una cantidad exacta, usa 1
-- Las unidades deben ser una de las listadas, elige la más apropiada
-- Si no encuentras descripción, usa string vacío`;
+Devuelve ÚNICAMENTE este JSON válido, sin ningún texto antes ni después, sin markdown:
+{"recetas":[{"nombre":"nombre del plato","descripcion":"método breve de elaboración","ingredientes":[{"nombre":"ingrediente","cantidad":1,"unidad":"kg"}]}]}
+
+REGLAS ESTRICTAS:
+- Solo JSON, absolutamente nada más
+- "recetas" es siempre un array aunque haya una sola receta
+- cantidad debe ser un número (no texto, no fracciones como 1/2, usa 0.5)
+- unidad debe ser exactamente una de: kg, g, L, ml, ud, bote, caja, bolsa, ración
+- Si no puedes leer bien algún ingrediente, inclúyelo con la mejor aproximación
+- Si no hay cantidad clara, usa 1
+- descripcion puede ser vacía ""`;
 
   const body = {
     contents:[{ parts:[
       { text: prompt },
       { inline_data:{ mime_type: mimeType, data: b64 } }
     ]}],
-    generationConfig:{ temperature:0.1, maxOutputTokens:8000 }
+    generationConfig:{ temperature:0, maxOutputTokens:8000, responseMimeType:"application/json" }
   };
 
-  const modelos = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-001",
-  ];
-
+  const modelos = ["gemini-2.5-flash","gemini-2.0-flash","gemini-2.0-flash-001"];
   let texto = "";
   let ultimoError = null;
 
@@ -980,24 +1038,21 @@ Reglas importantes:
   }
 
   if (!texto) throw new Error("No se pudo conectar con Gemini: " + ultimoError);
-  // Extraer JSON de forma robusta — Gemini a veces añade texto antes/después
+
+  // Extraer JSON de forma robusta
   let jsonStr = texto;
-  // Buscar primer { o [ y último } o ]
   const firstBrace = texto.indexOf("{");
   const firstBracket = texto.indexOf("[");
   let start = -1;
   if (firstBrace !== -1 && firstBracket !== -1) start = Math.min(firstBrace, firstBracket);
   else if (firstBrace !== -1) start = firstBrace;
   else if (firstBracket !== -1) start = firstBracket;
-
   if (start !== -1) {
     const lastBrace   = texto.lastIndexOf("}");
     const lastBracket = texto.lastIndexOf("]");
     const end = Math.max(lastBrace, lastBracket);
     if (end > start) jsonStr = texto.slice(start, end + 1);
   }
-
-  // Limpiar markdown si quedó
   jsonStr = jsonStr.replace(/```json|```/g,"").trim();
 
   const parsed = JSON.parse(jsonStr);
@@ -1073,19 +1128,55 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
     }
   };
 
-  // Guardar todas las recetas seleccionadas de una vez
+  // Guardar recetas IA — añade automáticamente los ingredientes no registrados al inventario
   const guardarRecetasIA=async()=>{
     if(!iaResultado?.length) return;
     const updates={};
+
+    // 1. Crear productos nuevos para ingredientes que no están en inventario
+    const productosNuevos = {}; // nombre -> id nuevo
+    iaResultado.filter(re=>re.seleccionada).forEach(re=>{
+      (re.ingsExtras||[]).forEach(ing=>{
+        if(!productosNuevos[ing.nombre]) {
+          const id=uid();
+          productosNuevos[ing.nombre]=id;
+          updates[`restaurantes/${restoId}/productos/${id}`]={
+            id, nombre:ing.nombre, stock:0, minStock:0,
+            unidad:ing.unidad||"ud", categoria:"Sin categoría", proveedorId:null
+          };
+        }
+      });
+    });
+
+    // 2. Crear las recetas con todos los ingredientes (DB + nuevos)
     iaResultado.filter(re=>re.seleccionada).forEach(re=>{
       const id=uid();
+      const ingsCompletos={...re.ingsEnDB};
+      (re.ingsExtras||[]).forEach(ing=>{
+        const prodId=productosNuevos[ing.nombre]||
+          productos.find(p=>p.nombre.toLowerCase()===ing.nombre.toLowerCase())?.id;
+        if(prodId){
+          const iid=uid();
+          ingsCompletos[iid]={id:iid,productoId:prodId,cantidad:ing.cantidad,unidad:ing.unidad||"ud"};
+        }
+      });
       updates[`restaurantes/${restoId}/recetas/${id}`]={
         id, nombre:re.nombre, descripcion:re.descripcion||"",
         responsableId:"", productoResultadoId:"", cantidadResultado:0, unidadResultado:"ud",
-        ingredientes:re.ingsEnDB, archivoUrl:archivoUrl, ts:Date.now()
+        ingredientes:ingsCompletos, archivoUrl:archivoUrl, ts:Date.now()
       };
     });
+
     if(Object.keys(updates).length) await fbMultiUpdate(updates);
+
+    const numNuevos=Object.keys(productosNuevos).length;
+    if(numNuevos>0){
+      const nId=uid();
+      await dbSet(`restaurantes/${restoId}/notificaciones/${nId}`,{
+        id:nId, texto:`📦 Se añadieron ${numNuevos} producto(s) nuevo(s) al inventario desde recetas IA. Configura su stock mínimo cuando puedas.`,
+        tipo:"info", ts:Date.now(), leida:false
+      });
+    }
     resetModal();
   };
 
