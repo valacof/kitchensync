@@ -1075,7 +1075,9 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
   const [iaEstado,setIaEstado]     = useState("idle"); // idle | subiendo | analizando | listo | error
   const [iaResultado,setIaResultado] = useState(null); // resultado de Gemini
   const [iaIngExtras,setIaIngExtras] = useState([]); // ingredientes extraídos no en DB
-  const [archivoUrl,setArchivoUrl]   = useState(""); // url cloudinary del archivo
+  const [archivoUrl,    setArchivoUrl]    = useState(""); // url cloudinary del PDF/archivo receta
+  const [fotoEmplUrl,   setFotoEmplUrl]   = useState(""); // url cloudinary de la foto del emplatado
+  const [subiendoFoto,  setSubiendoFoto]  = useState(false);
 
   const productos  = objToArr(resto.productos||{});
   const recetas    = objToArr(resto.recetas||{});
@@ -1088,15 +1090,25 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
     const id=uid();
     const datos={...nueva,id,cantidadResultado:parseFloat(nueva.cantidadResultado)||0};
     if(archivoUrl) datos.archivoUrl=archivoUrl;
+    if(fotoEmplUrl) datos.fotoEmplatado=fotoEmplUrl;
     await dbSet(`restaurantes/${restoId}/recetas/${id}`,datos);
     setNueva({nombre:"",descripcion:"",responsableId:"",productoResultadoId:"",cantidadResultado:"",unidadResultado:"ud",ingredientes:{}});
-    setArchivoUrl(""); setShowAdd(false);
+    setArchivoUrl(""); setFotoEmplUrl(""); setShowAdd(false);
   };
 
   const eliminarReceta=async id=>await dbSet(`restaurantes/${restoId}/recetas/${id}`,null);
 
   const resetIA=()=>{ setIaFile(null); setIaPreview(null); setIaEstado("idle"); setIaResultado(null); setIaIngExtras([]); setArchivoUrl(""); };
-  const resetModal=()=>{ setShowAdd(false); setModoAdd("manual"); resetIA(); setNueva({nombre:"",descripcion:"",responsableId:"",productoResultadoId:"",cantidadResultado:"",unidadResultado:"ud",ingredientes:{}}); };
+  const resetModal=()=>{ setShowAdd(false); setModoAdd("manual"); resetIA(); setFotoEmplUrl(""); setNueva({nombre:"",descripcion:"",responsableId:"",productoResultadoId:"",cantidadResultado:"",unidadResultado:"ud",ingredientes:{}}); };
+
+  const subirFotoEmplatado=async(file)=>{
+    setSubiendoFoto(true);
+    try {
+      const {url}=await subirCloudinary(file);
+      setFotoEmplUrl(url);
+    } catch(e){ console.error(e); }
+    setSubiendoFoto(false);
+  };
 
   // Subir archivo y analizar con Gemini
   const procesarArchivo=async(file)=>{
@@ -1107,9 +1119,8 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
       const {url} = await subirCloudinary(file);
       setArchivoUrl(url);
       setIaEstado("analizando");
-      const recetas = await extraerRecetaConGemini(file, url);
-      // Para cada receta detectada, calcular qué ingredientes están en DB y cuáles no
-      const recetasProcesadas = recetas.map(re=>{
+      const recetasIA = await extraerRecetaConGemini(file);
+      const recetasProcesadas = recetasIA.map(re=>{
         const ingsEnDB={};
         const ingsExtras=[];
         (re.ingredientes||[]).forEach(ing=>{
@@ -1163,7 +1174,8 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
       updates[`restaurantes/${restoId}/recetas/${id}`]={
         id, nombre:re.nombre, descripcion:re.descripcion||"",
         responsableId:"", productoResultadoId:"", cantidadResultado:0, unidadResultado:"ud",
-        ingredientes:ingsCompletos, archivoUrl:archivoUrl, ts:Date.now()
+        ingredientes:ingsCompletos, archivoUrl:archivoUrl,
+        fotoEmplatado: fotoEmplUrl||"", ts:Date.now()
       };
     });
 
@@ -1229,7 +1241,8 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
                 <div style={{display:"flex",gap:8,marginTop:6,flexWrap:"wrap"}}>
                   {resp&&<span style={{fontSize:12,color:"#888"}}>{ROLES[resp.rol]?.icon} {resp.nombre}</span>}
                   {prodRes&&<span style={{fontSize:12,color:"#4EC9A0",background:"#4EC9A011",padding:"2px 8px",borderRadius:99}}>+{re.cantidadResultado} {re.unidadResultado} → {prodRes.nombre}</span>}
-                  {re.archivoUrl&&<a href={re.archivoUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:"#7B6FB0",background:"#7B6FB011",padding:"2px 8px",borderRadius:99,textDecoration:"none"}}>📎 Ver archivo</a>}
+                  {re.archivoUrl&&<a href={re.archivoUrl} target="_blank" rel="noreferrer" style={{fontSize:11,color:"#7B6FB0",background:"#7B6FB011",padding:"2px 8px",borderRadius:99,textDecoration:"none"}}>📎 Ver receta</a>}
+                  {re.fotoEmplatado&&<span style={{fontSize:11,color:"#4EC9A0",background:"#4EC9A011",padding:"2px 8px",borderRadius:99}}>🍽️ Foto</span>}
                 </div>
               </div>
               <div style={{display:"flex",gap:6}}>
@@ -1240,8 +1253,14 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
             </div>
             {isOpen&&(
               <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid #222"}}>
+                {re.fotoEmplatado&&(
+                  <div style={{marginBottom:12}}>
+                    <div style={{fontSize:11,color:"#888",marginBottom:6,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5}}>🍽️ Emplatado</div>
+                    <img src={re.fotoEmplatado} alt="emplatado" style={{width:"100%",borderRadius:10,maxHeight:220,objectFit:"cover"}}/>
+                  </div>
+                )}
                 {re.archivoUrl&&re.archivoUrl.match(/\.(jpg|jpeg|png|webp)/i)&&(
-                  <img src={re.archivoUrl} alt="receta" style={{width:"100%",borderRadius:8,marginBottom:10,maxHeight:200,objectFit:"cover"}}/>
+                  <img src={re.archivoUrl} alt="receta" style={{width:"100%",borderRadius:8,marginBottom:10,maxHeight:160,objectFit:"cover"}}/>
                 )}
                 <div style={{fontSize:12,fontWeight:700,color:"#888",marginBottom:8,textTransform:"uppercase",letterSpacing:0.5}}>Ingredientes</div>
                 {ings.length===0?<div style={{fontSize:13,color:"#444"}}>Sin ingredientes</div>
@@ -1379,6 +1398,18 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
                   <div style={{flex:1}}><label className="ks-label">Unidad</label><select className="ks-input" value={nueva.unidadResultado} onChange={e=>setNueva(p=>({...p,unidadResultado:e.target.value}))}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select></div>
                 </div>
               )}
+              <label className="ks-label">📸 Foto del emplatado (opcional)</label>
+              {fotoEmplUrl
+                ? <div style={{position:"relative"}}>
+                    <img src={fotoEmplUrl} alt="emplatado" style={{width:"100%",borderRadius:10,maxHeight:160,objectFit:"cover"}}/>
+                    <button className="ks-del" style={{position:"absolute",top:6,right:6,background:"#000a",borderRadius:99}} onClick={()=>setFotoEmplUrl("")}>✕</button>
+                  </div>
+                : <label style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",border:"1px dashed #2a2a2a",borderRadius:10,cursor:"pointer",background:"#111"}}>
+                    <span style={{fontSize:20}}>🍽️</span>
+                    <span style={{fontSize:13,color:"#666"}}>{subiendoFoto?"Subiendo...":"Añadir foto del plato terminado"}</span>
+                    <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>{ if(e.target.files[0]) subirFotoEmplatado(e.target.files[0]); }}/>
+                  </label>
+              }
               <div style={{display:"flex",gap:8,marginTop:8}}>
                 <button className="ks-btn-sec" style={{flex:1}} onClick={resetModal}>Cancelar</button>
                 <button className="ks-btn-primary" style={{flex:1}} onClick={crearReceta}>Guardar</button>
@@ -1433,6 +1464,22 @@ function TabRecetas({ resto, yo, esJefe, restoId }) {
               <div style={{flex:1}}><label className="ks-label">Unidad</label><select className="ks-input" value={editando.unidadResultado||"ud"} onChange={e=>setEditando(p=>({...p,unidadResultado:e.target.value}))}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select></div>
             </div>
           )}
+
+          <label className="ks-label">📸 Foto del emplatado</label>
+          {editando.fotoEmplatado
+            ? <div style={{position:"relative"}}>
+                <img src={editando.fotoEmplatado} alt="emplatado" style={{width:"100%",borderRadius:10,maxHeight:160,objectFit:"cover"}}/>
+                <button className="ks-del" style={{position:"absolute",top:6,right:6,background:"#000a",borderRadius:99}} onClick={()=>setEditando(p=>({...p,fotoEmplatado:""}))}>✕</button>
+              </div>
+            : <label style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",border:"1px dashed #2a2a2a",borderRadius:10,cursor:"pointer",background:"#111"}}>
+                <span style={{fontSize:20}}>🍽️</span>
+                <span style={{fontSize:13,color:"#666"}}>Añadir foto del plato terminado</span>
+                <input type="file" accept="image/*" style={{display:"none"}} onChange={async e=>{
+                  if(!e.target.files[0]) return;
+                  try { const {url}=await subirCloudinary(e.target.files[0]); setEditando(p=>({...p,fotoEmplatado:url})); } catch(err){ console.error(err); }
+                }}/>
+              </label>
+          }
 
           <div style={{display:"flex",gap:8,marginTop:8}}>
             <button className="ks-btn-sec" style={{flex:1}} onClick={()=>setEditando(null)}>Cancelar</button>
