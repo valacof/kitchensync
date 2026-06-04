@@ -118,14 +118,31 @@ async function checkStockAlertas(restoId, productos, recetas, empleados, tareas)
   const updates = {};
   for (const p of productos) {
     if (p.minStock > 0 && p.stock < p.minStock) {
+      const esElaboracion = p.tipo === "elaboracion";
       const comprasSnap = await dbGet(`restaurantes/${restoId}/compras`);
       const comprasArr = objToArr(comprasSnap || {});
       const yaEnCompras = comprasArr.find(c => !c.hecho && c.productoId === p.id);
+
       if (!yaEnCompras) {
-        const cId = uid();
-        updates[`restaurantes/${restoId}/compras/${cId}`] = { id:cId, productoId:p.id, nombre:p.nombre, cantidad:p.minStock*2, unidad:p.unidad, auto:true, hecho:false, ts:Date.now() };
+        // Solo los ingredientes van a lista de compras
+        if (!esElaboracion) {
+          const cId = uid();
+          updates[`restaurantes/${restoId}/compras/${cId}`] = {
+            id:cId, productoId:p.id, nombre:p.nombre,
+            cantidad:p.minStock*2, unidad:p.unidad,
+            proveedorId: p.proveedorId||null,
+            auto:true, hecho:false, ts:Date.now()
+          };
+        }
         const nId = uid();
-        updates[`restaurantes/${restoId}/notificaciones/${nId}`] = { id:nId, texto:`⚠️ Stock bajo: ${p.nombre} (${fmt(p.stock)} ${p.unidad} / mín ${p.minStock} ${p.unidad})`, tipo:"alerta", ts:Date.now(), leida:false };
+        updates[`restaurantes/${restoId}/notificaciones/${nId}`] = {
+          id:nId,
+          texto: esElaboracion
+            ? `⚠️ Elaboración baja: ${p.nombre} (${fmt(p.stock)} ${p.unidad} / mín ${p.minStock} ${p.unidad})`
+            : `⚠️ Stock bajo: ${p.nombre} (${fmt(p.stock)} ${p.unidad} / mín ${p.minStock} ${p.unidad})`,
+          tipo:"alerta", ts:Date.now(), leida:false
+        };
+        // Las elaboraciones generan tarea de preparación automática
         const receta = recetas.find(re => re.productoResultadoId === p.id);
         if (receta?.responsableId) {
           const tareasArr = objToArr(tareas || {});
@@ -133,9 +150,16 @@ async function checkStockAlertas(restoId, productos, recetas, empleados, tareas)
           if (!yaHayTarea) {
             const tId = uid();
             const resp = empleados.find(e => e.id === receta.responsableId);
-            updates[`restaurantes/${restoId}/tareas/${tId}`] = { id:tId, nombre:`Preparar: ${receta.nombre}`, cat:"produccion", prioridad:"alta", asignado:receta.responsableId, completado:false, creadoPor:"sistema", recetaId:receta.id, solicitudes:{}, ts:Date.now() };
+            updates[`restaurantes/${restoId}/tareas/${tId}`] = {
+              id:tId, nombre:`Preparar: ${receta.nombre}`, cat:"produccion", prioridad:"alta",
+              asignado:receta.responsableId, completado:false, creadoPor:"sistema",
+              recetaId:receta.id, solicitudes:{}, ts:Date.now()
+            };
             const n2Id = uid();
-            updates[`restaurantes/${restoId}/notificaciones/${n2Id}`] = { id:n2Id, texto:`📋 Tarea auto: "Preparar: ${receta.nombre}" → ${resp?.nombre||"responsable"}`, tipo:"alerta", ts:Date.now(), leida:false };
+            updates[`restaurantes/${restoId}/notificaciones/${n2Id}`] = {
+              id:n2Id, texto:`📋 Tarea auto: "Preparar: ${receta.nombre}" → ${resp?.nombre||"responsable"}`,
+              tipo:"alerta", ts:Date.now(), leida:false
+            };
           }
         }
       }
@@ -685,29 +709,28 @@ function RecetaCalculadora({ tarea, resto, onClose }) {
 // ─── TAB STOCK ───────────────────────────────────────────────────────────────
 
 function TabStock({ resto, yo, esJefe, restoId }) {
-  const [showAdd,setShowAdd]=useState(false);
-  const [modAdd,setModAdd]=useState("catalogo");
-  const [busqueda,setBusqueda]=useState("");
-  const [selCat,setSelCat]=useState("Todas");
-  const [nuevo,setNuevo]=useState({nombre:"",stock:"",minStock:"",unidad:"ud",categoria:"",proveedorId:""});
-  const [sel,setSel]=useState([]);
-  const [editProd,setEditProd]=useState(null);
-  const [solicProd,setSolicProd]=useState(null); // solicitar preparación de un producto
+  const [tabStock,   setTabStock]   = useState("ingredientes"); // "ingredientes" | "elaboraciones"
+  const [showAdd,    setShowAdd]    = useState(false);
+  const [modAdd,     setModAdd]     = useState("catalogo");
+  const [busqueda,   setBusqueda]   = useState("");
+  const [selCat,     setSelCat]     = useState("Todas");
+  const [nuevo,      setNuevo]      = useState({nombre:"",stock:"",minStock:"",unidad:"ud",categoria:"",proveedorId:"",tipo:"ingrediente"});
+  const [sel,        setSel]        = useState([]);
+  const [editProd,   setEditProd]   = useState(null);
+  const [solicProd,  setSolicProd]  = useState(null);
 
-  const enviarSolicitudMateria=async(prod, texto)=>{
+  const enviarSolicitudMateria=async(prod,texto)=>{
     if(!texto.trim()) return;
-    // Buscar receta vinculada a este producto como resultado
     const recetaVinculada=recetas.find(re=>re.productoResultadoId===prod.id);
     const responsableId=recetaVinculada?.responsableId||null;
     const nId=uid();
     const updates={};
     updates[`restaurantes/${restoId}/notificaciones/${nId}`]={
       id:nId,
-      texto:`🧑‍🍳 ${yo.nombre} solicita preparar "${prod.nombre}": "${texto}"${responsableId?` → asignado a ${empleados.find(e=>e.id===responsableId)?.nombre||"responsable"}`:""}`,
+      texto:`🧑‍🍳 ${yo.nombre} solicita preparar "${prod.nombre}": "${texto}"${responsableId?` → ${empleados.find(e=>e.id===responsableId)?.nombre||"responsable"}`:""}`,
       tipo:"alerta", ts:Date.now(), leida:false
     };
-    // Si hay receta vinculada con responsable, crear tarea automáticamente
-    if(recetaVinculada && responsableId){
+    if(recetaVinculada&&responsableId){
       const tId=uid();
       updates[`restaurantes/${restoId}/tareas/${tId}`]={
         id:tId, nombre:`Preparar: ${prod.nombre} (solicitado por ${yo.nombre})`,
@@ -719,10 +742,12 @@ function TabStock({ resto, yo, esJefe, restoId }) {
     await fbMultiUpdate(updates);
     setSolicProd(null);
   };
-  const productos=objToArr(resto.productos||{});
-  const proveedores=objToArr(resto.proveedores||{});
-  const recetas=objToArr(resto.recetas||{});
-  const empleados=objToArr(resto.empleados||{});
+
+  const todosProductos = objToArr(resto.productos||{});
+  const productos      = todosProductos.filter(p=> tabStock==="ingredientes" ? p.tipo!=="elaboracion" : p.tipo==="elaboracion");
+  const proveedores    = objToArr(resto.proveedores||{});
+  const recetas        = objToArr(resto.recetas||{});
+  const empleados      = objToArr(resto.empleados||{});
 
   const agregarProducto=async()=>{
     if(!nuevo.nombre.trim()) return;
@@ -731,111 +756,149 @@ function TabStock({ resto, yo, esJefe, restoId }) {
       id, nombre:nuevo.nombre,
       stock: nuevo.stock===""?0:parseFloat(nuevo.stock),
       minStock: nuevo.minStock===""?0:parseFloat(nuevo.minStock),
-      unidad:nuevo.unidad, categoria:nuevo.categoria||"General", proveedorId:nuevo.proveedorId||null
+      unidad:nuevo.unidad, categoria:nuevo.categoria||"General",
+      proveedorId: nuevo.tipo==="elaboracion"?null:(nuevo.proveedorId||null),
+      tipo: nuevo.tipo,
     });
-    setNuevo({nombre:"",stock:"",minStock:"",unidad:"ud",categoria:"",proveedorId:""}); setShowAdd(false);
+    setNuevo({nombre:"",stock:"",minStock:"",unidad:"ud",categoria:"",proveedorId:"",tipo:tabStock==="elaboraciones"?"elaboracion":"ingrediente"});
+    setShowAdd(false);
   };
 
   const agregarDesdeCatalogo=async()=>{
     if(!sel.length) return;
     const updates={};
-    sel.filter(item=>!productos.find(p=>p.nombre===item.nombre)).forEach(item=>{
+    sel.filter(item=>!todosProductos.find(p=>p.nombre===item.nombre)).forEach(item=>{
       const cat=CATALOGO.find(c=>c.nombre===item.nombre);
       const id=uid();
-      updates[`restaurantes/${restoId}/productos/${id}`]={id,nombre:item.nombre,stock:0,minStock:0,unidad:item.unidad,categoria:cat?.categoria||"General",proveedorId:null};
+      updates[`restaurantes/${restoId}/productos/${id}`]={
+        id, nombre:item.nombre, stock:0, minStock:0,
+        unidad:item.unidad, categoria:cat?.categoria||"General",
+        proveedorId:null, tipo:"ingrediente"
+      };
     });
     if(Object.keys(updates).length) await fbMultiUpdate(updates);
     setSel([]); setShowAdd(false); setBusqueda("");
   };
 
-  const cambiarUnidadSel=(nombre,unidad)=>{
-    setSel(prev=>prev.map(item=>item.nombre===nombre?{...item,unidad}:item));
-  };
+  const cambiarUnidadSel=(nombre,unidad)=>setSel(prev=>prev.map(item=>item.nombre===nombre?{...item,unidad}:item));
 
-  // Guardar edición completa de producto (stock, minStock, unidad, proveedor)
   const guardarEdicionProd=async()=>{
     if(!editProd) return;
     const updates={
-      [`restaurantes/${restoId}/productos/${editProd.id}/stock`]: parseFloat(editProd.stock)||0,
-      [`restaurantes/${restoId}/productos/${editProd.id}/minStock`]: parseFloat(editProd.minStock)||0,
-      [`restaurantes/${restoId}/productos/${editProd.id}/unidad`]: editProd.unidad,
+      [`restaurantes/${restoId}/productos/${editProd.id}/stock`]:       parseFloat(editProd.stock)||0,
+      [`restaurantes/${restoId}/productos/${editProd.id}/minStock`]:    parseFloat(editProd.minStock)||0,
+      [`restaurantes/${restoId}/productos/${editProd.id}/unidad`]:      editProd.unidad,
       [`restaurantes/${restoId}/productos/${editProd.id}/proveedorId`]: editProd.proveedorId||null,
-      [`restaurantes/${restoId}/productos/${editProd.id}/categoria`]: editProd.categoria||"General",
+      [`restaurantes/${restoId}/productos/${editProd.id}/categoria`]:   editProd.categoria||"General",
+      [`restaurantes/${restoId}/productos/${editProd.id}/tipo`]:        editProd.tipo||"ingrediente",
     };
     await fbMultiUpdate(updates);
-    // Comprobar alarmas con los valores nuevos
-    const prodActualizado=productos.map(p=>p.id===editProd.id?{...p,...editProd}:p);
+    const prodActualizado=todosProductos.map(p=>p.id===editProd.id?{...p,...editProd}:p);
     await checkStockAlertas(restoId,prodActualizado,recetas,empleados,resto.tareas);
     setEditProd(null);
   };
 
   const ajustarStock=async(id,delta)=>{
-    const prod=productos.find(p=>p.id===id); if(!prod) return;
+    const prod=todosProductos.find(p=>p.id===id); if(!prod) return;
     const nuevoStock=Math.max(0,+(prod.stock+delta).toFixed(2));
     await dbSet(`restaurantes/${restoId}/productos/${id}/stock`,nuevoStock);
-    const prodActualizado=productos.map(p=>p.id===id?{...p,stock:nuevoStock}:p);
+    const prodActualizado=todosProductos.map(p=>p.id===id?{...p,stock:nuevoStock}:p);
     await checkStockAlertas(restoId,prodActualizado,recetas,empleados,resto.tareas);
   };
 
   const eliminar=async id=>await dbSet(`restaurantes/${restoId}/productos/${id}`,null);
-  const toggleSel=c=>{
-    const yaEsta=sel.find(item=>item.nombre===c.nombre);
-    if(yaEsta) setSel(prev=>prev.filter(item=>item.nombre!==c.nombre));
-    else setSel(prev=>[...prev,{nombre:c.nombre,unidad:c.unidad}]);
-  };
+  const toggleSel=c=>{ const yaEsta=sel.find(item=>item.nombre===c.nombre); if(yaEsta) setSel(prev=>prev.filter(item=>item.nombre!==c.nombre)); else setSel(prev=>[...prev,{nombre:c.nombre,unidad:c.unidad}]); };
   const categorias=[...new Set(productos.map(p=>p.categoria))];
   const catsCatalogo=["Todas",...new Set(CATALOGO.map(c=>c.categoria))];
-  const catalogoFiltrado=CATALOGO.filter(c=>!productos.find(p=>p.nombre===c.nombre)&&c.nombre.toLowerCase().includes(busqueda.toLowerCase())&&(selCat==="Todas"||c.categoria===selCat));
+  const catalogoFiltrado=CATALOGO.filter(c=>!todosProductos.find(p=>p.nombre===c.nombre)&&c.nombre.toLowerCase().includes(busqueda.toLowerCase())&&(selCat==="Todas"||c.categoria===selCat));
+
+  const bajosIngredientes = todosProductos.filter(p=>p.tipo!=="elaboracion"&&p.minStock>0&&p.stock<p.minStock).length;
+  const bajosElab         = todosProductos.filter(p=>p.tipo==="elaboracion"&&p.minStock>0&&p.stock<p.minStock).length;
+
+  const renderProducto=(p)=>{
+    const bajo=p.minStock>0&&p.stock<p.minStock;
+    const pct=Math.min(100,Math.round((p.stock/(p.minStock*2||1))*100));
+    const esElab=p.tipo==="elaboracion";
+    return (
+      <div key={p.id} style={{...SK.card,borderColor:bajo?"#E8733A44":"#1e1e1e"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:14,fontWeight:600,color:bajo?"#E8733A":"#eee"}}>{p.nombre}</div>
+            <div style={{fontSize:12,color:"#555",marginTop:2}}>
+              Mín: {p.minStock} {p.unidad}
+              {!esElab&&p.proveedorId&&<span style={{color:"#7B6FB0",marginLeft:8}}>· {proveedores.find(pv=>pv.id===p.proveedorId)?.nombre}</span>}
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            {esJefe&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,-1)}>−</button>}
+            <span style={{fontSize:15,fontWeight:700,color:bajo?"#E8733A":"#fff",minWidth:60,textAlign:"center"}}>{fmt(p.stock)} {p.unidad}</span>
+            {esJefe&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,1)}>+</button>}
+            {esJefe&&<button className="ks-chip" style={{fontSize:12,padding:"3px 8px",color:"#D4A017",borderColor:"#D4A01744"}} onClick={()=>setEditProd({...p})}>✏️</button>}
+            {!esJefe&&esElab&&recetas.find(re=>re.productoResultadoId===p.id)&&(
+              <button className="ks-solic-btn" onClick={()=>setSolicProd(p)}>Solicitar</button>
+            )}
+            {esJefe&&<button className="ks-del" onClick={()=>eliminar(p.id)}>✕</button>}
+          </div>
+        </div>
+        <div style={{marginTop:8,height:4,background:"#222",borderRadius:99}}><div style={{height:4,width:`${pct}%`,background:bajo?"#E8733A":"#4EC9A0",borderRadius:99,transition:"width .3s"}}/></div>
+        {bajo&&<div style={{fontSize:11,color:"#E8733A",marginTop:4}}>
+          {esElab?"⚠️ Elaboración baja — se generará tarea de preparación":"⚠️ Stock bajo — añadido a lista de compras"}
+        </div>}
+      </div>
+    );
+  };
 
   return (
     <div style={{padding:"14px 14px 8px"}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
         <div style={{fontSize:15,fontWeight:700,color:"#fff"}}>Inventario</div>
-        {esJefe&&<button className="ks-btn-primary" onClick={()=>{setShowAdd(true);setModAdd("catalogo");setSel([]);setBusqueda("");}}>+ Producto</button>}
+        {esJefe&&<button className="ks-btn-primary" onClick={()=>{setShowAdd(true);setModAdd(tabStock==="ingredientes"?"catalogo":"manual");setSel([]);setBusqueda("");setNuevo(p=>({...p,tipo:tabStock==="elaboraciones"?"elaboracion":"ingrediente"}));}}>+ Añadir</button>}
       </div>
-      {productos.filter(p=>p.stock<p.minStock).length>0&&<div style={{background:"#E8733A11",border:"1px solid #E8733A44",borderRadius:10,padding:"10px 14px",marginBottom:14,fontSize:13,color:"#E8733A"}}>⚠️ {productos.filter(p=>p.stock<p.minStock).length} producto(s) bajo mínimo</div>}
+
+      {/* Tabs ingredientes / elaboraciones */}
+      <div style={{display:"flex",background:"#111",borderRadius:10,padding:3,gap:3,marginBottom:12}}>
+        <button onClick={()=>setTabStock("ingredientes")} style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:tabStock==="ingredientes"?"#222":"transparent",color:tabStock==="ingredientes"?"#fff":"#555",fontSize:13,cursor:"pointer",fontWeight:600,fontFamily:"'DM Sans',sans-serif",position:"relative"}}>
+          🛒 Ingredientes
+          {bajosIngredientes>0&&<span style={{...MA.badge,top:2,right:4}}>{bajosIngredientes}</span>}
+        </button>
+        <button onClick={()=>setTabStock("elaboraciones")} style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:tabStock==="elaboraciones"?"#222":"transparent",color:tabStock==="elaboraciones"?"#fff":"#555",fontSize:13,cursor:"pointer",fontWeight:600,fontFamily:"'DM Sans',sans-serif",position:"relative"}}>
+          🔪 Elaboraciones
+          {bajosElab>0&&<span style={{...MA.badge,top:2,right:4}}>{bajosElab}</span>}
+        </button>
+      </div>
+
+      {productos.filter(p=>p.minStock>0&&p.stock<p.minStock).length>0&&(
+        <div style={{background:"#E8733A11",border:"1px solid #E8733A44",borderRadius:10,padding:"10px 14px",marginBottom:14,fontSize:13,color:"#E8733A"}}>
+          ⚠️ {productos.filter(p=>p.minStock>0&&p.stock<p.minStock).length} {tabStock==="ingredientes"?"ingrediente(s)":"elaboración(es)"} bajo mínimo
+        </div>
+      )}
+
+      {productos.length===0&&(
+        <div style={{color:"#444",fontSize:14,textAlign:"center",marginTop:40}}>
+          Sin {tabStock==="ingredientes"?"ingredientes":"elaboraciones"}.{esJefe?" Añade el primero →":""}
+        </div>
+      )}
+
       {categorias.map(cat=>(
         <div key={cat} style={{marginBottom:16}}>
           <div style={{fontSize:12,fontWeight:700,color:"#555",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>{cat}</div>
-          {productos.filter(p=>p.categoria===cat).map(p=>{
-            const bajo=p.stock<p.minStock;
-            const pct=Math.min(100,Math.round((p.stock/(p.minStock*2||1))*100));
-            return (
-              <div key={p.id} style={{...SK.card,borderColor:bajo?"#E8733A44":"#1e1e1e"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:14,fontWeight:600,color:bajo?"#E8733A":"#eee"}}>{p.nombre}</div>
-                    <div style={{fontSize:12,color:"#555",marginTop:2}}>
-                      Mín: {p.minStock} {p.unidad}
-                      {p.proveedorId&&<span style={{color:"#7B6FB0",marginLeft:8}}>· {proveedores.find(pv=>pv.id===p.proveedorId)?.nombre}</span>}
-                    </div>
-                  </div>
-                  <div style={{display:"flex",alignItems:"center",gap:6}}>
-                    {esJefe&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,-1)}>−</button>}
-                    <span style={{fontSize:15,fontWeight:700,color:bajo?"#E8733A":"#fff",minWidth:60,textAlign:"center"}}>{fmt(p.stock)} {p.unidad}</span>
-                    {esJefe&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,1)}>+</button>}
-                    {esJefe&&<button className="ks-chip" style={{fontSize:12,padding:"3px 8px",color:"#D4A017",borderColor:"#D4A01744"}} onClick={()=>setEditProd({...p})}>✏️</button>}
-                    {!esJefe&&recetas.find(re=>re.productoResultadoId===p.id)&&(
-                      <button className="ks-solic-btn" onClick={()=>setSolicProd(p)}>Solicitar</button>
-                    )}
-                    {esJefe&&<button className="ks-del" onClick={()=>eliminar(p.id)}>✕</button>}
-                  </div>
-                </div>
-                <div style={{marginTop:8,height:4,background:"#222",borderRadius:99}}><div style={{height:4,width:`${pct}%`,background:bajo?"#E8733A":"#4EC9A0",borderRadius:99,transition:"width .3s"}}/></div>
-                {bajo&&<div style={{fontSize:11,color:"#E8733A",marginTop:4}}>⚠️ Stock bajo — añadido a lista de compras</div>}
-              </div>
-            );
-          })}
+          {productos.filter(p=>p.categoria===cat).map(p=>renderProducto(p))}
         </div>
       ))}
+
+      {/* Modal añadir */}
       {showAdd&&(
-        <Modal titulo="Añadir producto" onClose={()=>{setShowAdd(false);setSel([]);}}>
-          <div style={{display:"flex",background:"#111",borderRadius:10,padding:3,gap:3}}>
-            {[["catalogo","📋 Catálogo"],["manual","✏️ Personalizado"]].map(([m,l])=>(
-              <button key={m} onClick={()=>setModAdd(m)} style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:modAdd===m?"#222":"transparent",color:modAdd===m?"#fff":"#555",fontSize:13,cursor:"pointer",fontWeight:600,fontFamily:"'DM Sans',sans-serif"}}>{l}</button>
-            ))}
-          </div>
-          {modAdd==="catalogo"&&(
+        <Modal titulo={`Añadir ${tabStock==="elaboraciones"?"elaboración":"ingrediente"}`} onClose={()=>{setShowAdd(false);setSel([]);}}>
+          {tabStock==="ingredientes"&&(
+            <div style={{display:"flex",background:"#111",borderRadius:10,padding:3,gap:3}}>
+              {[["catalogo","📋 Catálogo"],["manual","✏️ Personalizado"]].map(([m,l])=>(
+                <button key={m} onClick={()=>setModAdd(m)} style={{flex:1,padding:"8px 0",borderRadius:8,border:"none",background:modAdd===m?"#222":"transparent",color:modAdd===m?"#fff":"#555",fontSize:13,cursor:"pointer",fontWeight:600,fontFamily:"'DM Sans',sans-serif"}}>{l}</button>
+              ))}
+            </div>
+          )}
+
+          {/* Catálogo — solo para ingredientes */}
+          {modAdd==="catalogo"&&tabStock==="ingredientes"&&(
             <>
               <input className="ks-input" placeholder="🔍 Buscar..." value={busqueda} onChange={e=>setBusqueda(e.target.value)} autoFocus/>
               <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
@@ -843,7 +906,8 @@ function TabStock({ resto, yo, esJefe, restoId }) {
               </div>
               {sel.length>0&&<div style={{background:"#4EC9A011",border:"1px solid #4EC9A044",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#4EC9A0"}}>✅ {sel.length} seleccionado(s)</div>}
               <div style={{maxHeight:240,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                {catalogoFiltrado.length===0?<div style={{color:"#444",fontSize:13,textAlign:"center",padding:"20px 0"}}>Sin resultados — prueba el modo personalizado</div>
+                {catalogoFiltrado.length===0
+                  ?<div style={{color:"#444",fontSize:13,textAlign:"center",padding:"20px 0"}}>Sin resultados — prueba el modo personalizado</div>
                   :catalogoFiltrado.map(c=>{
                     const selItem=sel.find(item=>item.nombre===c.nombre);
                     const s=!!selItem;
@@ -872,10 +936,12 @@ function TabStock({ resto, yo, esJefe, restoId }) {
               </div>
             </>
           )}
-          {modAdd==="manual"&&(
+
+          {/* Manual — para ingredientes y elaboraciones */}
+          {(modAdd==="manual"||tabStock==="elaboraciones")&&(
             <>
               <label className="ks-label">Nombre</label>
-              <input className="ks-input" placeholder="Ej: Caldo dashi" value={nuevo.nombre} onChange={e=>setNuevo(p=>({...p,nombre:e.target.value}))} autoFocus/>
+              <input className="ks-input" placeholder={tabStock==="elaboraciones"?"Ej: Fondo de pollo, Mojo rojo...":"Ej: Caldo dashi"} value={nuevo.nombre} onChange={e=>setNuevo(p=>({...p,nombre:e.target.value}))} autoFocus/>
               <div style={{display:"flex",gap:8}}>
                 <div style={{flex:1}}><label className="ks-label">Stock actual</label><input className="ks-input" type="number" min="0" step="0.1" placeholder="0" value={nuevo.stock} onChange={e=>setNuevo(p=>({...p,stock:e.target.value}))}/></div>
                 <div style={{flex:1}}><label className="ks-label">Stock mínimo</label><input className="ks-input" type="number" min="0" step="0.1" placeholder="0" value={nuevo.minStock} onChange={e=>setNuevo(p=>({...p,minStock:e.target.value}))}/></div>
@@ -884,11 +950,15 @@ function TabStock({ resto, yo, esJefe, restoId }) {
               <select className="ks-input" value={nuevo.unidad} onChange={e=>setNuevo(p=>({...p,unidad:e.target.value}))}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select>
               <label className="ks-label">Categoría</label>
               <input className="ks-input" placeholder="Ej: Caldos, Carnes..." value={nuevo.categoria} onChange={e=>setNuevo(p=>({...p,categoria:e.target.value}))}/>
-              <label className="ks-label">Proveedor</label>
-              <select className="ks-input" value={nuevo.proveedorId} onChange={e=>setNuevo(p=>({...p,proveedorId:e.target.value}))}>
-                <option value="">— Sin proveedor —</option>
-                {proveedores.map(pv=><option key={pv.id} value={pv.id}>{pv.nombre}</option>)}
-              </select>
+              {tabStock==="ingredientes"&&(
+                <>
+                  <label className="ks-label">Proveedor</label>
+                  <select className="ks-input" value={nuevo.proveedorId} onChange={e=>setNuevo(p=>({...p,proveedorId:e.target.value}))}>
+                    <option value="">— Sin proveedor —</option>
+                    {proveedores.map(pv=><option key={pv.id} value={pv.id}>{pv.nombre}</option>)}
+                  </select>
+                </>
+              )}
               <div style={{display:"flex",gap:8,marginTop:8}}>
                 <button className="ks-btn-sec" style={{flex:1}} onClick={()=>setShowAdd(false)}>Cancelar</button>
                 <button className="ks-btn-primary" style={{flex:1}} onClick={agregarProducto}>Añadir</button>
@@ -897,32 +967,34 @@ function TabStock({ resto, yo, esJefe, restoId }) {
           )}
         </Modal>
       )}
+
+      {/* Modal editar producto */}
       {editProd&&(
         <Modal titulo={`Editar — ${editProd.nombre}`} onClose={()=>setEditProd(null)}>
+          <label className="ks-label">Tipo</label>
+          <select className="ks-input" value={editProd.tipo||"ingrediente"} onChange={e=>setEditProd(p=>({...p,tipo:e.target.value}))}>
+            <option value="ingrediente">🛒 Ingrediente (se compra)</option>
+            <option value="elaboracion">🔪 Elaboración (se prepara en cocina)</option>
+          </select>
           <div style={{display:"flex",gap:8}}>
-            <div style={{flex:1}}>
-              <label className="ks-label">Stock actual</label>
-              <input className="ks-input" type="number" min="0" step="0.1" value={editProd.stock}
-                onChange={e=>setEditProd(p=>({...p,stock:e.target.value}))}/>
-            </div>
-            <div style={{flex:1}}>
-              <label className="ks-label">Stock mínimo</label>
-              <input className="ks-input" type="number" min="0" step="0.1" value={editProd.minStock}
-                onChange={e=>setEditProd(p=>({...p,minStock:e.target.value}))}/>
-            </div>
+            <div style={{flex:1}}><label className="ks-label">Stock actual</label><input className="ks-input" type="number" min="0" step="0.1" value={editProd.stock} onChange={e=>setEditProd(p=>({...p,stock:e.target.value}))}/></div>
+            <div style={{flex:1}}><label className="ks-label">Stock mínimo</label><input className="ks-input" type="number" min="0" step="0.1" value={editProd.minStock} onChange={e=>setEditProd(p=>({...p,minStock:e.target.value}))}/></div>
           </div>
           <label className="ks-label">Unidad</label>
           <select className="ks-input" value={editProd.unidad} onChange={e=>setEditProd(p=>({...p,unidad:e.target.value}))}>
             {UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}
           </select>
           <label className="ks-label">Categoría</label>
-          <input className="ks-input" placeholder="Ej: Carnes, Caldos..." value={editProd.categoria||""}
-            onChange={e=>setEditProd(p=>({...p,categoria:e.target.value}))}/>
-          <label className="ks-label">Proveedor</label>
-          <select className="ks-input" value={editProd.proveedorId||""} onChange={e=>setEditProd(p=>({...p,proveedorId:e.target.value||null}))}>
-            <option value="">— Sin proveedor —</option>
-            {proveedores.map(pv=><option key={pv.id} value={pv.id}>{pv.nombre}</option>)}
-          </select>
+          <input className="ks-input" placeholder="Ej: Carnes, Caldos..." value={editProd.categoria||""} onChange={e=>setEditProd(p=>({...p,categoria:e.target.value}))}/>
+          {(editProd.tipo||"ingrediente")==="ingrediente"&&(
+            <>
+              <label className="ks-label">Proveedor</label>
+              <select className="ks-input" value={editProd.proveedorId||""} onChange={e=>setEditProd(p=>({...p,proveedorId:e.target.value||null}))}>
+                <option value="">— Sin proveedor —</option>
+                {proveedores.map(pv=><option key={pv.id} value={pv.id}>{pv.nombre}</option>)}
+              </select>
+            </>
+          )}
           <div style={{display:"flex",gap:8,marginTop:8}}>
             <button className="ks-btn-sec" style={{flex:1}} onClick={()=>setEditProd(null)}>Cancelar</button>
             <button className="ks-btn-primary" style={{flex:1}} onClick={guardarEdicionProd}>Guardar</button>
@@ -931,14 +1003,13 @@ function TabStock({ resto, yo, esJefe, restoId }) {
       )}
 
       {solicProd&&(
-        <Modal titulo={`Solicitar preparación`} onClose={()=>setSolicProd(null)}>
+        <Modal titulo="Solicitar preparación" onClose={()=>setSolicProd(null)}>
           <div style={{fontSize:14,fontWeight:700,color:"#fff",marginBottom:4}}>{solicProd.nombre}</div>
           <div style={{fontSize:12,color:"#666",marginBottom:10}}>
             {recetas.find(re=>re.productoResultadoId===solicProd.id)
-              ? `Responsable: ${empleados.find(e=>e.id===recetas.find(re=>re.productoResultadoId===solicProd.id)?.responsableId)?.nombre||"Sin asignar"}`
-              : "Sin receta vinculada — se enviará notificación al equipo"}
+              ?`Responsable: ${empleados.find(e=>e.id===recetas.find(re=>re.productoResultadoId===solicProd.id)?.responsableId)?.nombre||"Sin asignar"}`
+              :"Sin receta vinculada — se enviará notificación al equipo"}
           </div>
-          <label className="ks-label">¿Cuánto necesitas? (opcional)</label>
           <SolicitudMateriaInput prod={solicProd} onEnviar={(txt)=>enviarSolicitudMateria(solicProd,txt)} onClose={()=>setSolicProd(null)}/>
         </Modal>
       )}
@@ -1496,16 +1567,58 @@ const RE={card:{background:"#161616",border:"1px solid #1e1e1e",borderRadius:12,
 
 function TabCompras({ resto, yo, esJefe, restoId }) {
   const [showAdd,setShowAdd]=useState(false);
-  const [nueva,setNueva]=useState({nombre:"",cantidad:"",unidad:"ud"});
-  const compras=objToArr(resto.compras||{});
+  const [nueva,setNueva]=useState({nombre:"",cantidad:"",unidad:"ud",proveedorId:""});
+  const compras    = objToArr(resto.compras||{});
+  const proveedores= objToArr(resto.proveedores||{});
+  const productos  = objToArr(resto.productos||{});
+  const hoy        = DIAS[new Date().getDay()===0?6:new Date().getDay()-1];
 
-  const toggleHecho=async id=>{const c=compras.find(c=>c.id===id);if(c) await dbSet(`restaurantes/${restoId}/compras/${id}/hecho`,!c.hecho);};
+  const toggleHecho=async id=>{ const c=compras.find(c=>c.id===id); if(c) await dbSet(`restaurantes/${restoId}/compras/${id}/hecho`,!c.hecho); };
   const eliminar=async id=>await dbSet(`restaurantes/${restoId}/compras/${id}`,null);
-  const agregar=async()=>{if(!nueva.nombre||!nueva.cantidad)return;const id=uid();await dbSet(`restaurantes/${restoId}/compras/${id}`,{id,nombre:nueva.nombre,cantidad:parseFloat(nueva.cantidad),unidad:nueva.unidad,auto:false,hecho:false,ts:Date.now()});setNueva({nombre:"",cantidad:"",unidad:"ud"});setShowAdd(false);};
-  const limpiarHechos=async()=>{const updates={};compras.filter(c=>c.hecho).forEach(c=>{updates[`restaurantes/${restoId}/compras/${c.id}`]=null;});if(Object.keys(updates).length)await fbMultiUpdate(updates);};
+  const agregar=async()=>{
+    if(!nueva.nombre||!nueva.cantidad) return;
+    const id=uid();
+    // Buscar proveedor del producto si existe
+    const prod=productos.find(p=>p.nombre.toLowerCase()===nueva.nombre.toLowerCase());
+    const provId=nueva.proveedorId||prod?.proveedorId||null;
+    await dbSet(`restaurantes/${restoId}/compras/${id}`,{
+      id, nombre:nueva.nombre, cantidad:parseFloat(nueva.cantidad),
+      unidad:nueva.unidad, proveedorId:provId, auto:false, hecho:false, ts:Date.now()
+    });
+    setNueva({nombre:"",cantidad:"",unidad:"ud",proveedorId:""}); setShowAdd(false);
+  };
+  const limpiarHechos=async()=>{
+    const updates={};
+    compras.filter(c=>c.hecho).forEach(c=>{ updates[`restaurantes/${restoId}/compras/${c.id}`]=null; });
+    if(Object.keys(updates).length) await fbMultiUpdate(updates);
+  };
 
   const pendientes=compras.filter(c=>!c.hecho);
-  const hechos=compras.filter(c=>c.hecho);
+  const hechos    =compras.filter(c=>c.hecho);
+
+  // Agrupar pendientes por proveedor
+  const grupos=[];
+  const conProveedor=pendientes.filter(c=>c.proveedorId);
+  const sinProveedor=pendientes.filter(c=>!c.proveedorId);
+  proveedores.forEach(pv=>{
+    const items=conProveedor.filter(c=>c.proveedorId===pv.id);
+    if(items.length>0) grupos.push({pv,items});
+  });
+  // Proveedores con items pero sin objeto en proveedores (raro, por si acaso)
+  const pvIds=proveedores.map(p=>p.id);
+  const huerfanos=conProveedor.filter(c=>!pvIds.includes(c.proveedorId));
+  if(huerfanos.length>0) sinProveedor.push(...huerfanos);
+
+  const renderItem=(c,hecho=false)=>(
+    <div key={c.id} style={{...CP.item,opacity:hecho?.4:1}}>
+      <button className={`ks-check${hecho?" ks-check-done":""}`} onClick={()=>toggleHecho(c.id)}>{hecho?"✓":""}</button>
+      <div style={{flex:1}}>
+        <div style={{fontSize:14,color:"#eee",textDecoration:hecho?"line-through":"none"}}>{c.nombre}</div>
+        <div style={{fontSize:12,color:"#666"}}>{c.cantidad} {c.unidad}{c.auto&&<span style={{color:"#7B6FB0",fontSize:10}}> · auto</span>}</div>
+      </div>
+      <button className="ks-del" onClick={()=>eliminar(c.id)}>✕</button>
+    </div>
+  );
 
   return (
     <div style={{padding:"14px 14px 8px"}}>
@@ -1516,19 +1629,60 @@ function TabCompras({ resto, yo, esJefe, restoId }) {
           <button className="ks-btn-primary" onClick={()=>setShowAdd(true)}>+ Añadir</button>
         </div>
       </div>
-      {pendientes.length===0&&hechos.length===0&&<div style={{color:"#444",fontSize:14,textAlign:"center",marginTop:40}}>La lista está vacía</div>}
+
+      {pendientes.length===0&&hechos.length===0&&(
+        <div style={{color:"#444",fontSize:14,textAlign:"center",marginTop:40}}>La lista está vacía</div>
+      )}
+
+      {/* ── PENDIENTES AGRUPADOS POR PROVEEDOR ── */}
       {pendientes.length>0&&(
-        <div style={{marginBottom:16}}>
-          <div style={{fontSize:12,fontWeight:700,color:"#555",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Pendiente ({pendientes.length})</div>
-          {pendientes.map(c=>(<div key={c.id} style={CP.item}><button className="ks-check" onClick={()=>toggleHecho(c.id)}/><div style={{flex:1}}><div style={{fontSize:14,color:"#eee"}}>{c.nombre}</div><div style={{fontSize:12,color:"#666"}}>{c.cantidad} {c.unidad}{c.auto&&<span style={{color:"#7B6FB0",fontSize:10}}> · auto</span>}</div></div><button className="ks-del" onClick={()=>eliminar(c.id)}>✕</button></div>))}
-        </div>
+        <>
+          <div style={{fontSize:12,fontWeight:700,color:"#555",textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>
+            Pendiente ({pendientes.length})
+          </div>
+
+          {/* Grupos con proveedor */}
+          {grupos.map(({pv,items})=>(
+            <div key={pv.id} style={{background:"#161616",border:"1px solid #1e1e1e",borderRadius:12,padding:"12px 14px",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:700,color:"#fff"}}>{pv.nombre}</div>
+                  {pv.diasPedido?.length>0&&(
+                    <div style={{fontSize:11,color:"#666",marginTop:2}}>
+                      📅 {pv.diasPedido.join(", ")}
+                      {pv.diasPedido.includes(hoy)&&<span style={{color:"#4EC9A0",marginLeft:6}}>← hoy</span>}
+                    </div>
+                  )}
+                </div>
+                <div style={{display:"flex",gap:6}}>
+                  {pv.telefono&&<a href={`tel:${pv.telefono}`} style={{background:"#4EC9A022",color:"#4EC9A0",border:"1px solid #4EC9A044",borderRadius:8,padding:"4px 10px",fontSize:12,textDecoration:"none",fontWeight:600}}>📞</a>}
+                  {pv.email&&<a href={`mailto:${pv.email}?subject=Pedido ${new Date().toLocaleDateString("es-ES")}&body=${items.map(c=>`- ${c.nombre}: ${c.cantidad} ${c.unidad}`).join("%0A")}`} style={{background:"#7B6FB022",color:"#7B6FB0",border:"1px solid #7B6FB044",borderRadius:8,padding:"4px 10px",fontSize:12,textDecoration:"none",fontWeight:600}}>✉️</a>}
+                </div>
+              </div>
+              {items.map(c=>renderItem(c))}
+            </div>
+          ))}
+
+          {/* Sin proveedor */}
+          {sinProveedor.length>0&&(
+            <div style={{background:"#161616",border:"1px solid #1e1e1e",borderRadius:12,padding:"12px 14px",marginBottom:10}}>
+              <div style={{fontSize:12,color:"#555",fontWeight:700,marginBottom:8}}>SIN PROVEEDOR ASIGNADO</div>
+              {sinProveedor.map(c=>renderItem(c))}
+            </div>
+          )}
+        </>
       )}
+
+      {/* ── COMPRADO ── */}
       {hechos.length>0&&(
-        <div>
+        <div style={{marginTop:8}}>
           <div style={{fontSize:12,fontWeight:700,color:"#555",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Comprado ({hechos.length})</div>
-          {hechos.map(c=>(<div key={c.id} style={{...CP.item,opacity:0.4}}><button className="ks-check ks-check-done" onClick={()=>toggleHecho(c.id)}>✓</button><div style={{flex:1}}><div style={{fontSize:14,color:"#eee",textDecoration:"line-through"}}>{c.nombre}</div><div style={{fontSize:12,color:"#666"}}>{c.cantidad} {c.unidad}</div></div><button className="ks-del" onClick={()=>eliminar(c.id)}>✕</button></div>))}
+          <div style={{background:"#161616",border:"1px solid #1e1e1e",borderRadius:12,padding:"12px 14px"}}>
+            {hechos.map(c=>renderItem(c,true))}
+          </div>
         </div>
       )}
+
       {showAdd&&(
         <Modal titulo="Añadir a la compra" onClose={()=>setShowAdd(false)}>
           <label className="ks-label">Producto</label>
@@ -1537,6 +1691,11 @@ function TabCompras({ resto, yo, esJefe, restoId }) {
             <div style={{flex:1}}><label className="ks-label">Cantidad</label><input className="ks-input" type="number" min="0" step="0.1" value={nueva.cantidad} onChange={e=>setNueva(p=>({...p,cantidad:e.target.value}))}/></div>
             <div style={{flex:1}}><label className="ks-label">Unidad</label><select className="ks-input" value={nueva.unidad} onChange={e=>setNueva(p=>({...p,unidad:e.target.value}))}>{UNIDADES.map(u=><option key={u} value={u}>{u}</option>)}</select></div>
           </div>
+          <label className="ks-label">Proveedor</label>
+          <select className="ks-input" value={nueva.proveedorId} onChange={e=>setNueva(p=>({...p,proveedorId:e.target.value}))}>
+            <option value="">— Sin proveedor —</option>
+            {proveedores.map(pv=><option key={pv.id} value={pv.id}>{pv.nombre}</option>)}
+          </select>
           <div style={{display:"flex",gap:8,marginTop:8}}>
             <button className="ks-btn-sec" style={{flex:1}} onClick={()=>setShowAdd(false)}>Cancelar</button>
             <button className="ks-btn-primary" style={{flex:1}} onClick={agregar}>Añadir</button>
