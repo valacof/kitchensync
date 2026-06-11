@@ -450,20 +450,42 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
     updates[`restaurantes/${restoId}/tareas/${tarea.id}/completado`]=!yaHecha;
     if(!yaHecha&&tarea.recetaId){
       const receta=recetas.find(re=>re.id===tarea.recetaId);
-      if(receta?.productoResultadoId){
+      if(receta){
         const factor=factorOverride??1;
-        const cantidadReal=+(receta.cantidadResultado*factor).toFixed(2);
-        const prod=productos.find(p=>p.id===receta.productoResultadoId);
-        if(prod){
-          const nuevoStock=+(prod.stock+cantidadReal).toFixed(2);
-          updates[`restaurantes/${restoId}/productos/${prod.id}/stock`]=nuevoStock;
-          const nId=uid();
-          updates[`restaurantes/${restoId}/notificaciones/${nId}`]={id:nId,texto:`✅ ${yo.nombre} preparó "${receta.nombre}"${factor!==1?` (×${fmt(factor)})`:""}→ +${cantidadReal} ${receta.unidadResultado} de ${prod.nombre} (total: ${fmt(nuevoStock)} ${prod.unidad})`,tipo:"info",ts:Date.now(),leida:false};
-          await fbMultiUpdate(updates);
-          const prodActualizado=productos.map(p=>p.id===prod.id?{...p,stock:nuevoStock}:p);
-          await checkStockAlertas(restoId,prodActualizado,recetas,empleados,resto.tareas);
-          return;
+        let prodActualizado=[...productos];
+
+        // 1. DESCONTAR ingredientes usados
+        const ingsUsados=[];
+        objToArr(receta.ingredientes||{}).forEach(ing=>{
+          const prod=productos.find(p=>p.id===ing.productoId);
+          if(prod){
+            const cantUsada=+(ing.cantidad*factor).toFixed(2);
+            const nuevoStock=Math.max(0,+(prod.stock-cantUsada).toFixed(2));
+            updates[`restaurantes/${restoId}/productos/${prod.id}/stock`]=nuevoStock;
+            prodActualizado=prodActualizado.map(p=>p.id===prod.id?{...p,stock:nuevoStock}:p);
+            ingsUsados.push(`${prod.nombre}: -${cantUsada}${ing.unidad}`);
+          }
+        });
+
+        // 2. SUMAR producto resultado
+        let textoNotif=`✅ ${yo.nombre} preparó "${receta.nombre}"${factor!==1?` (×${fmt(factor)})`:""}`;
+        if(receta.productoResultadoId){
+          const prod=productos.find(p=>p.id===receta.productoResultadoId);
+          if(prod){
+            const cantidadReal=+(receta.cantidadResultado*factor).toFixed(2);
+            const nuevoStock=+(prod.stock+cantidadReal).toFixed(2);
+            updates[`restaurantes/${restoId}/productos/${prod.id}/stock`]=nuevoStock;
+            prodActualizado=prodActualizado.map(p=>p.id===prod.id?{...p,stock:nuevoStock}:p);
+            textoNotif+=` → +${cantidadReal} ${receta.unidadResultado} de ${prod.nombre}`;
+          }
         }
+        if(ingsUsados.length>0) textoNotif+=` | Usados: ${ingsUsados.join(", ")}`;
+
+        const nId=uid();
+        updates[`restaurantes/${restoId}/notificaciones/${nId}`]={id:nId,texto:textoNotif,tipo:"info",ts:Date.now(),leida:false};
+        await fbMultiUpdate(updates);
+        await checkStockAlertas(restoId,prodActualizado,recetas,empleados,resto.tareas);
+        return;
       }
     }
     if(!yaHecha&&!tarea.recetaId){
@@ -685,6 +707,7 @@ function RecetaCalculadora({ tarea, resto, onClose }) {
       )}
       <div style={{background:"#111",borderRadius:12,padding:"14px"}}>
         <div style={{fontSize:12,fontWeight:700,color:"#555",textTransform:"uppercase",letterSpacing:0.5,marginBottom:10}}>Cantidades para ×{fmt(factor)} receta</div>
+        {ingArr.length>0&&<div style={{fontSize:11,color:"#888",fontWeight:700,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>↓ Se descontará del stock:</div>}
         {ingArr.map((ing,i)=>{
           const prod=productos.find(p=>p.id===ing.productoId);
           const cantE=+(ing.cantidad*factor).toFixed(2);
@@ -693,13 +716,13 @@ function RecetaCalculadora({ tarea, resto, onClose }) {
             <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid #1a1a1a"}}>
               <div><div style={{fontSize:13,color:"#ddd"}}>{prod?.nombre||"—"}</div><div style={{fontSize:11,color:"#555"}}>Stock: {fmt(prod?.stock??0)} {prod?.unidad}</div></div>
               <div style={{textAlign:"right"}}>
-                <div style={{fontSize:15,fontWeight:700,color:suf?"#4EC9A0":"#E8733A"}}>{cantE} {ing.unidad}</div>
-                {!suf&&<div style={{fontSize:10,color:"#E8733A"}}>⚠️ faltan {fmt(cantE-(prod?.stock??0))}</div>}
+                <div style={{fontSize:15,fontWeight:700,color:suf?"#E8733A":"#e05555"}}>−{cantE} {ing.unidad}</div>
+                {!suf&&<div style={{fontSize:10,color:"#e05555"}}>⚠️ faltan {fmt(cantE-(prod?.stock??0))}</div>}
               </div>
             </div>
           );
         })}
-        {prodRes&&<div style={{display:"flex",justifyContent:"space-between",padding:"10px 0 0",marginTop:4}}><span style={{fontSize:13,color:"#4EC9A0",fontWeight:600}}>✅ Se obtendrán</span><span style={{fontSize:16,fontWeight:800,color:"#4EC9A0"}}>{+(receta.cantidadResultado*factor).toFixed(2)} {receta.unidadResultado} de {prodRes.nombre}</span></div>}
+        {prodRes&&<div style={{display:"flex",justifyContent:"space-between",padding:"10px 0 0",marginTop:4,borderTop:"1px solid #2a2a2a"}}><span style={{fontSize:13,color:"#4EC9A0",fontWeight:600}}>✅ Se añadirá al stock:</span><span style={{fontSize:16,fontWeight:800,color:"#4EC9A0"}}>+{+(receta.cantidadResultado*factor).toFixed(2)} {receta.unidadResultado} de {prodRes.nombre}</span></div>}
       </div>
       <button className="ks-btn-sec" onClick={onClose}>Cerrar</button>
     </Modal>
