@@ -1735,6 +1735,7 @@ const CP={item:{display:"flex",alignItems:"center",gap:12,padding:"10px 0",borde
 function TabProveedores({ resto, yo, esJefe, restoId }) {
   const [showAdd,setShowAdd]=useState(false);
   const [detalle,setDetalle]=useState(null);
+  const [editPv,setEditPv]=useState(null);
   const [nuevo,setNuevo]=useState({nombre:"",telefono:"",email:"",diasPedido:[]});
   const proveedores=objToArr(resto.proveedores||{});
   const productos=objToArr(resto.productos||{});
@@ -1742,11 +1743,9 @@ function TabProveedores({ resto, yo, esJefe, restoId }) {
 
   const agregar=async()=>{if(!nuevo.nombre)return;const id=uid();await dbSet(`restaurantes/${restoId}/proveedores/${id}`,{id,...nuevo});setNuevo({nombre:"",telefono:"",email:"",diasPedido:[]});setShowAdd(false);};
   const eliminar=async id=>{await dbSet(`restaurantes/${restoId}/proveedores/${id}`,null);const updates={};productos.filter(p=>p.proveedorId===id).forEach(p=>{updates[`restaurantes/${restoId}/productos/${p.id}/proveedorId`]=null;});if(Object.keys(updates).length)await fbMultiUpdate(updates);};
+  const guardarEdicionPv=async()=>{if(!editPv)return;await dbSet(`restaurantes/${restoId}/proveedores/${editPv.id}`,editPv);setEditPv(null);};
   const toggleDia=d=>setNuevo(p=>({...p,diasPedido:p.diasPedido.includes(d)?p.diasPedido.filter(x=>x!==d):[...p.diasPedido,d]}));
-
-  const productosBajos=productos.filter(p=>p.stock<p.minStock);
-  const pedidosPorProveedor=proveedores.map(pv=>({proveedor:pv,items:productosBajos.filter(p=>p.proveedorId===pv.id)})).filter(g=>g.items.length>0);
-  const sinProveedor=productosBajos.filter(p=>!p.proveedorId);
+  const toggleDiaEdit=d=>setEditPv(p=>({...p,diasPedido:(p.diasPedido||[]).includes(d)?(p.diasPedido||[]).filter(x=>x!==d):[...(p.diasPedido||[]),d]}));
 
   return (
     <div style={{padding:"14px 14px 8px"}}>
@@ -1754,27 +1753,6 @@ function TabProveedores({ resto, yo, esJefe, restoId }) {
         <div style={{fontSize:15,fontWeight:700,color:"#fff"}}>Proveedores</div>
         {esJefe&&<button className="ks-btn-primary" onClick={()=>setShowAdd(true)}>+ Proveedor</button>}
       </div>
-      {productosBajos.length>0&&(
-        <div style={{marginBottom:20}}>
-          <div style={{fontSize:13,fontWeight:700,color:"#E8733A",marginBottom:10}}>⚠️ Pedidos necesarios</div>
-          {pedidosPorProveedor.map(({proveedor,items})=>(
-            <div key={proveedor.id} style={PV.pedidoCard}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-                <div>
-                  <div style={{fontSize:14,fontWeight:700,color:"#fff"}}>{proveedor.nombre}</div>
-                  {proveedor.diasPedido?.length>0&&<div style={{fontSize:12,color:"#666",marginTop:2}}>📅 {proveedor.diasPedido.join(", ")}{proveedor.diasPedido.includes(hoy)&&<span style={{color:"#4EC9A0",marginLeft:6}}>← hoy</span>}</div>}
-                </div>
-                <div style={{display:"flex",gap:6}}>
-                  {proveedor.telefono&&<a href={`tel:${proveedor.telefono}`} style={{background:"#4EC9A022",color:"#4EC9A0",border:"1px solid #4EC9A044",borderRadius:8,padding:"4px 10px",fontSize:12,textDecoration:"none",fontWeight:600}}>📞</a>}
-                  {proveedor.email&&<a href={`mailto:${proveedor.email}?subject=Pedido ${new Date().toLocaleDateString("es-ES")}&body=${items.map(p=>`- ${p.nombre}: ${p.minStock*2} ${p.unidad}`).join("%0A")}`} style={{background:"#7B6FB022",color:"#7B6FB0",border:"1px solid #7B6FB044",borderRadius:8,padding:"4px 10px",fontSize:12,textDecoration:"none",fontWeight:600}}>✉️</a>}
-                </div>
-              </div>
-              {items.map(p=>(<div key={p.id} style={PV.itemRow}><span style={{fontSize:13,color:"#ddd",flex:1}}>{p.nombre}</span><span style={{fontSize:12,color:"#E8733A",marginRight:8}}>{fmt(p.stock)} {p.unidad}</span><span style={{fontSize:12,color:"#4EC9A0",fontWeight:700}}>pedir: {p.minStock*2} {p.unidad}</span></div>))}
-            </div>
-          ))}
-          {sinProveedor.length>0&&(<div style={{...PV.pedidoCard,borderColor:"#555"}}><div style={{fontSize:13,color:"#888",marginBottom:8}}>Sin proveedor asignado</div>{sinProveedor.map(p=>(<div key={p.id} style={PV.itemRow}><span style={{fontSize:13,color:"#ddd",flex:1}}>{p.nombre}</span><span style={{fontSize:12,color:"#E8733A"}}>{fmt(p.stock)} / mín {p.minStock} {p.unidad}</span></div>))}</div>)}
-        </div>
-      )}
       <div style={{fontSize:12,fontWeight:700,color:"#555",textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>Directorio</div>
       {proveedores.length===0&&<div style={{color:"#444",fontSize:14,textAlign:"center",marginTop:20}}>Sin proveedores.{esJefe?" Añade el primero →":""}</div>}
       {proveedores.map(pv=>{
@@ -1793,6 +1771,7 @@ function TabProveedores({ resto, yo, esJefe, restoId }) {
               </div>
               <div style={{display:"flex",gap:6}}>
                 <button className="ks-chip" onClick={()=>setDetalle(isOpen?null:pv.id)}>{isOpen?"Cerrar":"Ver"}</button>
+                {esJefe&&<button className="ks-chip" style={{color:"#D4A017",borderColor:"#D4A01744"}} onClick={()=>setEditPv({...pv})}>✏️</button>}
                 {esJefe&&<button className="ks-del" onClick={()=>eliminar(pv.id)}>✕</button>}
               </div>
             </div>
@@ -1820,6 +1799,25 @@ function TabProveedores({ resto, yo, esJefe, restoId }) {
           <div style={{display:"flex",gap:8,marginTop:8}}>
             <button className="ks-btn-sec" style={{flex:1}} onClick={()=>setShowAdd(false)}>Cancelar</button>
             <button className="ks-btn-primary" style={{flex:1}} onClick={agregar}>Guardar</button>
+          </div>
+        </Modal>
+      )}
+
+      {editPv&&(
+        <Modal titulo={`Editar — ${editPv.nombre}`} onClose={()=>setEditPv(null)}>
+          <label className="ks-label">Nombre</label>
+          <input className="ks-input" value={editPv.nombre} onChange={e=>setEditPv(p=>({...p,nombre:e.target.value}))} autoFocus/>
+          <label className="ks-label">Teléfono</label>
+          <input className="ks-input" placeholder="922 000 000" value={editPv.telefono||""} onChange={e=>setEditPv(p=>({...p,telefono:e.target.value}))}/>
+          <label className="ks-label">Email</label>
+          <input className="ks-input" placeholder="pedidos@proveedor.es" value={editPv.email||""} onChange={e=>setEditPv(p=>({...p,email:e.target.value}))}/>
+          <label className="ks-label">Días de pedido</label>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {DIAS.map(d=>(<button key={d} onClick={()=>toggleDiaEdit(d)} style={{padding:"5px 10px",borderRadius:20,border:"1px solid",fontSize:12,cursor:"pointer",fontFamily:"'DM Sans',sans-serif",background:(editPv.diasPedido||[]).includes(d)?"#E8733A":"transparent",color:(editPv.diasPedido||[]).includes(d)?"#fff":"#666",borderColor:(editPv.diasPedido||[]).includes(d)?"#E8733A":"#2a2a2a"}}>{d}</button>))}
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <button className="ks-btn-sec" style={{flex:1}} onClick={()=>setEditPv(null)}>Cancelar</button>
+            <button className="ks-btn-primary" style={{flex:1}} onClick={guardarEdicionPv}>Guardar</button>
           </div>
         </Modal>
       )}
