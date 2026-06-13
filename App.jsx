@@ -433,15 +433,65 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
   const [showNueva,setShowNueva]=useState(false);
   const [solicTarea,setSolicTarea]=useState(null);
   const [calcTarea,setCalcTarea]=useState(null);
-  const [nueva,setNueva]=useState({nombre:"",cat:"produccion",prioridad:"media",asignado:"",recetaId:""});
+  const [nueva,setNueva]=useState({nombre:"",cat:"produccion",prioridad:"media",asignado:"",recetaId:"",programada:false,diasSemana:[],diasAntes:1});
+  const [showProgramadas,setShowProgramadas]=useState(false);
 
   const tareas=objToArr(resto.tareas||{});
   const productos=objToArr(resto.productos||{});
   const recetas=objToArr(resto.recetas||{});
   const empleados=objToArr(resto.empleados||{});
 
-  const tareasFiltradas=tareas.filter(t=>filtro==="todas"?true:filtro==="mias"?t.asignado===yo.id:t.cat===filtro);
-  const total=tareas.length, hechas=tareas.filter(t=>t.completado).length;
+  // Día actual
+  const hoy=DIAS[new Date().getDay()===0?6:new Date().getDay()-1];
+  const idxHoy=DIAS.indexOf(hoy);
+
+  // Separar tareas normales (activas hoy) de plantillas programadas
+  const tareasActivas=tareas.filter(t=>!t.plantilla);
+  const plantillas=tareas.filter(t=>t.plantilla);
+
+  // Activar plantillas programadas que correspondan a hoy
+  // (se llama al entrar a la tab y al resetDia)
+  const activarProgramadas=async()=>{
+    const updates={};
+    plantillas.forEach(p=>{
+      if(!p.diasSemana?.length) return;
+      // Calcular si hoy es un día en que debe aparecer (diasAntes antes del día objetivo)
+      const debeAparecer = p.diasSemana.some(dia=>{
+        const idxDia=DIAS.indexOf(dia);
+        const diasAntes=p.diasAntes||1;
+        // ¿Está hoy dentro del rango "diasAntes días antes de dia"?
+        for(let i=0;i<diasAntes;i++){
+          const idxCheck=(idxDia-i+7)%7;
+          if(idxCheck===idxHoy) return true;
+        }
+        return false;
+      });
+      if(!debeAparecer) return;
+      // Comprobar si ya hay una tarea activa para esta plantilla hoy
+      const yaActiva=tareasActivas.find(t=>t.plantillaId===p.id&&!t.completado);
+      if(!yaActiva){
+        const id=uid();
+        updates[`restaurantes/${restoId}/tareas/${id}`]={
+          id, nombre:p.nombre, cat:p.cat, prioridad:p.prioridad,
+          asignado:p.asignado||null, completado:false,
+          creadoPor:"sistema", recetaId:p.recetaId||null,
+          plantillaId:p.id, solicitudes:{}, ts:Date.now()
+        };
+      }
+    });
+    if(Object.keys(updates).length) await fbMultiUpdate(updates);
+  };
+
+  // Activar al montar
+  useState(()=>{ if(esJefe) activarProgramadas(); },[]);
+
+  const tareasFiltradas=tareasActivas.filter(t=>
+    filtro==="todas"?true:
+    filtro==="mias"?t.asignado===yo.id:
+    filtro==="programadas"?!!t.plantillaId:
+    t.cat===filtro
+  );
+  const total=tareasActivas.length, hechas=tareasActivas.filter(t=>t.completado).length;
   const pct=total?Math.round((hechas/total)*100):0;
 
   const toggleCompletado=async(tarea,factorOverride)=>{
@@ -498,8 +548,24 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
   const crearTarea=async()=>{
     if(!nueva.nombre.trim()) return;
     const id=uid();
-    await dbSet(`restaurantes/${restoId}/tareas/${id}`,{id,nombre:nueva.nombre,cat:nueva.cat,prioridad:nueva.prioridad,asignado:nueva.asignado||null,completado:false,creadoPor:yo.id,recetaId:nueva.recetaId||null,solicitudes:{},ts:Date.now()});
-    setNueva({nombre:"",cat:"produccion",prioridad:"media",asignado:"",recetaId:""});
+    if(nueva.programada && nueva.diasSemana.length>0){
+      // Guardar como plantilla
+      await dbSet(`restaurantes/${restoId}/tareas/${id}`,{
+        id, nombre:nueva.nombre, cat:nueva.cat, prioridad:nueva.prioridad,
+        asignado:nueva.asignado||null, completado:false,
+        creadoPor:yo.id, recetaId:nueva.recetaId||null,
+        plantilla:true, diasSemana:nueva.diasSemana, diasAntes:nueva.diasAntes||1,
+        solicitudes:{}, ts:Date.now()
+      });
+    } else {
+      await dbSet(`restaurantes/${restoId}/tareas/${id}`,{
+        id, nombre:nueva.nombre, cat:nueva.cat, prioridad:nueva.prioridad,
+        asignado:nueva.asignado||null, completado:false,
+        creadoPor:yo.id, recetaId:nueva.recetaId||null,
+        solicitudes:{}, ts:Date.now()
+      });
+    }
+    setNueva({nombre:"",cat:"produccion",prioridad:"media",asignado:"",recetaId:"",programada:false,diasSemana:[],diasAntes:1});
     setShowNueva(false);
   };
 
@@ -517,11 +583,18 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
 
   const resetDia=async()=>{
     const updates={};
-    tareas.forEach(t=>{
+    // Solo resetear tareas activas (no plantillas)
+    tareasActivas.forEach(t=>{
       updates[`restaurantes/${restoId}/tareas/${t.id}/completado`]=false;
       updates[`restaurantes/${restoId}/tareas/${t.id}/solicitudes`]={};
     });
+    // Eliminar tareas generadas por plantillas (se regenerarán)
+    tareasActivas.filter(t=>t.plantillaId).forEach(t=>{
+      updates[`restaurantes/${restoId}/tareas/${t.id}`]=null;
+    });
     await fbMultiUpdate(updates);
+    // Reactivar plantillas del día
+    setTimeout(()=>activarProgramadas(), 500);
   };
 
   return (
@@ -534,7 +607,14 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
         <div style={TT.barWrap}><div style={{...TT.barFill,width:`${pct}%`}}/></div>
       </div>
       <div style={TT.filtros}>
-        {[{id:"todas",label:"Todas"},{id:"mias",label:"Mis tareas"},{id:"produccion",label:"🔪"},{id:"limpieza",label:"🧹"},{id:"almacen",label:"📦"}].map(f=>(
+        {[
+          {id:"todas",label:"Todas"},
+          {id:"mias",label:"Mis tareas"},
+          {id:"produccion",label:"🔪"},
+          {id:"limpieza",label:"🧹"},
+          {id:"almacen",label:"📦"},
+          {id:"programadas",label:"📅"},
+        ].map(f=>(
           <button key={f.id} className="ks-filtro" style={filtro===f.id?{background:"#E8733A",color:"#fff",borderColor:"#E8733A"}:{}} onClick={()=>setFiltro(f.id)}>{f.label}</button>
         ))}
       </div>
@@ -571,6 +651,7 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
                       <span style={{fontSize:10,padding:"1px 7px",borderRadius:99,background:PRIO[tarea.prioridad]?.color+"22",color:PRIO[tarea.prioridad]?.color,fontWeight:600}}>{PRIO[tarea.prioridad]?.label}</span>
                       {asig&&<span style={{fontSize:11,color:"#666"}}>{ROLES[asig.rol]?.icon} {asig.nombre}</span>}
                       {receta&&prodRes&&<span style={{fontSize:10,color:"#4EC9A0"}}>+{receta.cantidadResultado}{receta.unidadResultado} {prodRes.nombre}</span>}
+                      {tarea.plantillaId&&<span style={{fontSize:10,color:"#7B6FB0"}}>📅 programada</span>}
                     </div>
                     {solicitudes.length>0&&<div style={{fontSize:11,color:"#7B6FB0",marginTop:2}}>💬 {solicitudes.map(s=>{const emp=empleados.find(e=>e.id===s.de);return `${emp?.nombre}: ${s.texto}`;}).join(" · ")}</div>}
                   </div>
@@ -586,6 +667,33 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
           </div>
         );
       })}
+      {/* PLANTILLAS PROGRAMADAS — solo visible para el jefe */}
+      {esJefe&&plantillas.length>0&&(
+        <div style={{margin:"0 14px 14px"}}>
+          <button className="ks-btn-sec" style={{width:"100%",marginBottom:8}} onClick={()=>setShowProgramadas(p=>!p)}>
+            📅 Tareas programadas ({plantillas.length}) {showProgramadas?"▲":"▼"}
+          </button>
+          {showProgramadas&&(
+            <div style={{background:"#161616",border:"1px solid #1e1e1e",borderRadius:12,overflow:"hidden"}}>
+              {plantillas.map(p=>(
+                <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderBottom:"1px solid #1a1a1a"}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:13,color:"#ddd",fontWeight:600}}>{p.nombre}</div>
+                    <div style={{fontSize:11,color:"#7B6FB0",marginTop:2}}>
+                      📅 {p.diasSemana?.join(", ")} · aparece {p.diasAntes} día{p.diasAntes>1?"s":""} antes
+                    </div>
+                    <div style={{fontSize:11,color:"#555"}}>
+                      {CATS[p.cat]?.emoji} {CATS[p.cat]?.label} · {empleados.find(e=>e.id===p.asignado)?.nombre||"Sin asignar"}
+                    </div>
+                  </div>
+                  <button className="ks-del" onClick={()=>eliminarTarea(p.id)}>✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {showNueva&&(
         <Modal titulo="Nueva tarea" onClose={()=>setShowNueva(false)}>
           <label className="ks-label">Nombre</label>
@@ -613,6 +721,46 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
               {nueva.recetaId&&(()=>{const rec=recetas.find(r=>r.id===nueva.recetaId);const prod=rec&&productos.find(p=>p.id===rec.productoResultadoId);return rec&&prod?(<div style={{fontSize:12,color:"#4EC9A0",background:"#4EC9A011",padding:"8px 10px",borderRadius:8}}>✅ Al completar → +{rec.cantidadResultado} {rec.unidadResultado} de <b>{prod.nombre}</b></div>):null;})()}
             </>
           )}
+
+          {/* TAREA PROGRAMADA */}
+          <div style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderTop:"1px solid #1e1e1e",marginTop:4}}>
+            <button onClick={()=>setNueva(p=>({...p,programada:!p.programada}))}
+              className={nueva.programada?"ks-check ks-check-done":"ks-check"} style={{flexShrink:0}}>
+              {nueva.programada?"✓":""}
+            </button>
+            <span style={{fontSize:13,color:"#ccc"}}>Tarea programada (se repite)</span>
+          </div>
+
+          {nueva.programada&&(
+            <>
+              <label className="ks-label">Días de la semana que aplica</label>
+              <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                {DIAS.map(d=>(
+                  <button key={d} onClick={()=>setNueva(p=>({...p,diasSemana:p.diasSemana.includes(d)?p.diasSemana.filter(x=>x!==d):[...p.diasSemana,d]}))}
+                    style={{padding:"5px 10px",borderRadius:20,border:"1px solid",fontSize:12,cursor:"pointer",fontFamily:"'DM Sans',sans-serif",
+                      background:nueva.diasSemana.includes(d)?"#E8733A":"transparent",
+                      color:nueva.diasSemana.includes(d)?"#fff":"#666",
+                      borderColor:nueva.diasSemana.includes(d)?"#E8733A":"#2a2a2a"}}>
+                    {d.slice(0,3)}
+                  </button>
+                ))}
+              </div>
+              <label className="ks-label">Aparece con cuántos días de antelación</label>
+              <div style={{display:"flex",gap:6}}>
+                {[1,2,3].map(n=>(
+                  <button key={n} onClick={()=>setNueva(p=>({...p,diasAntes:n}))}
+                    className={nueva.diasAntes===n?"ks-btn-primary":"ks-chip"}
+                    style={{flex:1,padding:"8px 0",fontWeight:700}}>
+                    {n} día{n>1?"s":""}
+                  </button>
+                ))}
+              </div>
+              {nueva.diasSemana.length>0&&<div style={{fontSize:12,color:"#7B6FB0",background:"#7B6FB011",padding:"8px 10px",borderRadius:8}}>
+                📅 Aparecerá {nueva.diasAntes} día{nueva.diasAntes>1?"s":""} antes de: {nueva.diasSemana.join(", ")}
+              </div>}
+            </>
+          )}
+
           <div style={{display:"flex",gap:8,marginTop:8}}>
             <button className="ks-btn-sec" style={{flex:1}} onClick={()=>setShowNueva(false)}>Cancelar</button>
             <button className="ks-btn-primary" style={{flex:1}} onClick={crearTarea}>Crear</button>
