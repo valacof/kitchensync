@@ -491,13 +491,16 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
     filtro==="programadas"?!!t.plantillaId:
     t.cat===filtro
   );
-  const total=tareasActivas.length, hechas=tareasActivas.filter(t=>t.completado).length;
+  const tareasProgreso=esJefe?tareasActivas:tareasActivas.filter(t=>t.asignado===yo.id||!t.asignado);
+  const total=tareasProgreso.length, hechas=tareasProgreso.filter(t=>t.completado).length;
   const pct=total?Math.round((hechas/total)*100):0;
 
   const toggleCompletado=async(tarea,factorOverride)=>{
     const yaHecha=tarea.completado;
     const updates={};
     updates[`restaurantes/${restoId}/tareas/${tarea.id}/completado`]=!yaHecha;
+    updates[`restaurantes/${restoId}/tareas/${tarea.id}/completadoPor`]=!yaHecha?yo.id:null;
+    updates[`restaurantes/${restoId}/tareas/${tarea.id}/completadoTs`]=!yaHecha?Date.now():null;
     if(!yaHecha&&tarea.recetaId){
       const receta=recetas.find(re=>re.id===tarea.recetaId);
       if(receta){
@@ -601,7 +604,7 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
     <div style={{paddingBottom:8}}>
       <div style={TT.progBox}>
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-          <span style={{fontSize:13,color:"#888"}}>Progreso del día</span>
+          <span style={{fontSize:13,color:"#888"}}>{esJefe?"Progreso del día":"Mis tareas"}</span>
           <span style={{fontSize:13,fontWeight:700,color:"#E8733A"}}>{hechas}/{total} tareas</span>
         </div>
         <div style={TT.barWrap}><div style={{...TT.barFill,width:`${pct}%`}}/></div>
@@ -640,23 +643,34 @@ function TabTareas({ resto, yo, esJefe, restoId }) {
               const yaSolic=solicitudes.some(s=>s.de===yo.id);
               const receta=tarea.recetaId?recetas.find(re=>re.id===tarea.recetaId):null;
               const prodRes=receta?.productoResultadoId?productos.find(p=>p.id===receta.productoResultadoId):null;
+              // Cocineros solo pueden marcar/desmarcar sus propias tareas o las sin asignar
+              const puedeMarca=esJefe||!tarea.asignado||tarea.asignado===yo.id;
+              const esMia=tarea.asignado===yo.id;
               return (
                 <div key={tarea.id} className="ks-tarea-row" style={tarea.completado?{opacity:0.4}:{}}>
-                  <button className={`ks-check${tarea.completado?" ks-check-done":""}`} onClick={()=>toggleCompletado(tarea)}>
+                  <button
+                    className={`ks-check${tarea.completado?" ks-check-done":""}`}
+                    onClick={()=>puedeMarca&&toggleCompletado(tarea)}
+                    style={!puedeMarca?{opacity:0.3,cursor:"not-allowed"}:{}}
+                    title={!puedeMarca?"Solo puedes marcar tus propias tareas":""}>
                     {tarea.completado?"✓":""}
                   </button>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:14,color:"#ddd",textDecoration:tarea.completado?"line-through":"none",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{tarea.nombre}</div>
                     <div style={{display:"flex",gap:6,marginTop:3,flexWrap:"wrap",alignItems:"center"}}>
                       <span style={{fontSize:10,padding:"1px 7px",borderRadius:99,background:PRIO[tarea.prioridad]?.color+"22",color:PRIO[tarea.prioridad]?.color,fontWeight:600}}>{PRIO[tarea.prioridad]?.label}</span>
-                      {asig&&<span style={{fontSize:11,color:"#666"}}>{ROLES[asig.rol]?.icon} {asig.nombre}</span>}
+                      {asig&&<span style={{fontSize:11,color:esMia?"#E8733A":"#666"}}>{ROLES[asig.rol]?.icon} {asig.nombre}{esMia?" (tú)":""}</span>}
                       {receta&&prodRes&&<span style={{fontSize:10,color:"#4EC9A0"}}>+{receta.cantidadResultado}{receta.unidadResultado} {prodRes.nombre}</span>}
                       {tarea.plantillaId&&<span style={{fontSize:10,color:"#7B6FB0"}}>📅 programada</span>}
                     </div>
                     {solicitudes.length>0&&<div style={{fontSize:11,color:"#7B6FB0",marginTop:2}}>💬 {solicitudes.map(s=>{const emp=empleados.find(e=>e.id===s.de);return `${emp?.nombre}: ${s.texto}`;}).join(" · ")}</div>}
+                    {tarea.completado&&tarea.completadoPor&&(()=>{
+                      const quien=empleados.find(e=>e.id===tarea.completadoPor);
+                      return <div style={{fontSize:10,color:"#555",marginTop:2}}>✅ {quien?.nombre||"?"} · {tarea.completadoTs?timeAgo(tarea.completadoTs):""}</div>;
+                    })()}
                   </div>
                   <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end",flexShrink:0}}>
-                    {receta&&!tarea.completado&&<button className="ks-calc-btn" onClick={()=>setCalcTarea(tarea)}>🧮</button>}
+                    {receta&&!tarea.completado&&puedeMarca&&<button className="ks-calc-btn" onClick={()=>setCalcTarea(tarea)}>🧮</button>}
                     {!tarea.completado&&!yaSolic&&<button className="ks-solic-btn" onClick={()=>setSolicTarea(tarea)}>Solicitar</button>}
                     {yaSolic&&<span style={{fontSize:10,color:"#7B6FB0"}}>✉️</span>}
                     {esJefe&&<button className="ks-del" onClick={()=>eliminarTarea(tarea.id)}>✕</button>}
@@ -880,33 +894,37 @@ function RecetaCalculadora({ tarea, resto, onClose }) {
 // ─── TAB STOCK ───────────────────────────────────────────────────────────────
 
 function TabStock({ resto, yo, esJefe, restoId }) {
-  const [tabStock,   setTabStock]   = useState("ingredientes"); // "ingredientes" | "elaboraciones"
+  const [tabStock,   setTabStock]   = useState("ingredientes");
   const [showAdd,    setShowAdd]    = useState(false);
   const [modAdd,     setModAdd]     = useState("catalogo");
   const [busqueda,   setBusqueda]   = useState("");
+  const [busquedaStock, setBusquedaStock] = useState(""); // buscador en inventario
   const [selCat,     setSelCat]     = useState("Todas");
   const [nuevo,      setNuevo]      = useState({nombre:"",stock:"",minStock:"",unidad:"ud",categoria:"",proveedorId:"",tipo:"ingrediente"});
   const [sel,        setSel]        = useState([]);
   const [editProd,   setEditProd]   = useState(null);
   const [solicProd,  setSolicProd]  = useState(null);
 
-  const enviarSolicitudMateria=async(prod,texto)=>{
+  const enviarSolicitudMateria=async(prod,texto,destinatarioId)=>{
     if(!texto.trim()) return;
     const recetaVinculada=recetas.find(re=>re.productoResultadoId===prod.id);
-    const responsableId=recetaVinculada?.responsableId||null;
+    // Usar destinatario elegido, o el responsable de la receta, o sin asignar
+    const responsableId=destinatarioId||recetaVinculada?.responsableId||null;
+    const respNombre=empleados.find(e=>e.id===responsableId)?.nombre||"el equipo";
     const nId=uid();
     const updates={};
     updates[`restaurantes/${restoId}/notificaciones/${nId}`]={
       id:nId,
-      texto:`🧑‍🍳 ${yo.nombre} solicita preparar "${prod.nombre}": "${texto}"${responsableId?` → ${empleados.find(e=>e.id===responsableId)?.nombre||"responsable"}`:""}`,
+      texto:`🧑‍🍳 ${yo.nombre} solicita preparar "${prod.nombre}": "${texto}" → ${respNombre}`,
       tipo:"alerta", ts:Date.now(), leida:false
     };
-    if(recetaVinculada&&responsableId){
+    if(responsableId){
       const tId=uid();
       updates[`restaurantes/${restoId}/tareas/${tId}`]={
         id:tId, nombre:`Preparar: ${prod.nombre} (solicitado por ${yo.nombre})`,
         cat:"produccion", prioridad:"alta", asignado:responsableId,
-        completado:false, creadoPor:yo.id, recetaId:recetaVinculada.id,
+        completado:false, creadoPor:yo.id,
+        recetaId:recetaVinculada?.id||null,
         solicitudes:{}, ts:Date.now()
       };
     }
@@ -956,6 +974,7 @@ function TabStock({ resto, yo, esJefe, restoId }) {
   const guardarEdicionProd=async()=>{
     if(!editProd) return;
     const updates={
+      [`restaurantes/${restoId}/productos/${editProd.id}/nombre`]:     editProd.nombre,
       [`restaurantes/${restoId}/productos/${editProd.id}/stock`]:       parseFloat(editProd.stock)||0,
       [`restaurantes/${restoId}/productos/${editProd.id}/minStock`]:    parseFloat(editProd.minStock)||0,
       [`restaurantes/${restoId}/productos/${editProd.id}/unidad`]:      editProd.unidad,
@@ -990,6 +1009,7 @@ function TabStock({ resto, yo, esJefe, restoId }) {
     const bajo=p.minStock>0&&p.stock<p.minStock;
     const pct=Math.min(100,Math.round((p.stock/(p.minStock*2||1))*100));
     const esElab=p.tipo==="elaboracion";
+    const puedeAjustar=esJefe||(esElab&&!esJefe); // cocineros pueden ajustar elaboraciones
     return (
       <div key={p.id} style={{...SK.card,borderColor:bajo?"#E8733A44":"#1e1e1e"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -1001,13 +1021,11 @@ function TabStock({ resto, yo, esJefe, restoId }) {
             </div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:6}}>
-            {esJefe&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,-1)}>−</button>}
+            {puedeAjustar&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,-1)}>−</button>}
             <span style={{fontSize:15,fontWeight:700,color:bajo?"#E8733A":"#fff",minWidth:60,textAlign:"center"}}>{fmt(p.stock)} {p.unidad}</span>
-            {esJefe&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,1)}>+</button>}
+            {puedeAjustar&&<button className="ks-qty-btn" onClick={()=>ajustarStock(p.id,1)}>+</button>}
             {esJefe&&<button className="ks-chip" style={{fontSize:12,padding:"3px 8px",color:"#D4A017",borderColor:"#D4A01744"}} onClick={()=>setEditProd({...p})}>✏️</button>}
-            {!esJefe&&esElab&&recetas.find(re=>re.productoResultadoId===p.id)&&(
-              <button className="ks-solic-btn" onClick={()=>setSolicProd(p)}>Solicitar</button>
-            )}
+            {!esJefe&&esElab&&<button className="ks-solic-btn" onClick={()=>setSolicProd(p)}>Solicitar</button>}
             {esJefe&&<button className="ks-del" onClick={()=>eliminar(p.id)}>✕</button>}
           </div>
         </div>
@@ -1038,6 +1056,11 @@ function TabStock({ resto, yo, esJefe, restoId }) {
         </button>
       </div>
 
+      {/* Buscador inventario */}
+      <input className="ks-input" placeholder="🔍 Buscar en inventario..."
+        value={busquedaStock} onChange={e=>setBusquedaStock(e.target.value)}
+        style={{marginBottom:12}}/>
+
       {productos.filter(p=>p.minStock>0&&p.stock<p.minStock).length>0&&(
         <div style={{background:"#E8733A11",border:"1px solid #E8733A44",borderRadius:10,padding:"10px 14px",marginBottom:14,fontSize:13,color:"#E8733A"}}>
           ⚠️ {productos.filter(p=>p.minStock>0&&p.stock<p.minStock).length} {tabStock==="ingredientes"?"ingrediente(s)":"elaboración(es)"} bajo mínimo
@@ -1050,12 +1073,17 @@ function TabStock({ resto, yo, esJefe, restoId }) {
         </div>
       )}
 
-      {categorias.map(cat=>(
-        <div key={cat} style={{marginBottom:16}}>
-          <div style={{fontSize:12,fontWeight:700,color:"#555",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>{cat}</div>
-          {productos.filter(p=>p.categoria===cat).map(p=>renderProducto(p))}
-        </div>
-      ))}
+      {categorias.map(cat=>{
+        const prodsCat=productos.filter(p=>p.categoria===cat&&
+          (!busquedaStock||p.nombre.toLowerCase().includes(busquedaStock.toLowerCase())));
+        if(!prodsCat.length) return null;
+        return (
+          <div key={cat} style={{marginBottom:16}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#555",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>{cat}</div>
+            {prodsCat.map(p=>renderProducto(p))}
+          </div>
+        );
+      })}
 
       {/* Modal añadir */}
       {showAdd&&(
@@ -1142,6 +1170,8 @@ function TabStock({ resto, yo, esJefe, restoId }) {
       {/* Modal editar producto */}
       {editProd&&(
         <Modal titulo={`Editar — ${editProd.nombre}`} onClose={()=>setEditProd(null)}>
+          <label className="ks-label">Nombre</label>
+          <input className="ks-input" value={editProd.nombre} onChange={e=>setEditProd(p=>({...p,nombre:e.target.value}))} autoFocus/>
           <label className="ks-label">Tipo</label>
           <select className="ks-input" value={editProd.tipo||"ingrediente"} onChange={e=>setEditProd(p=>({...p,tipo:e.target.value}))}>
             <option value="ingrediente">🛒 Ingrediente (se compra)</option>
@@ -1176,12 +1206,12 @@ function TabStock({ resto, yo, esJefe, restoId }) {
       {solicProd&&(
         <Modal titulo="Solicitar preparación" onClose={()=>setSolicProd(null)}>
           <div style={{fontSize:14,fontWeight:700,color:"#fff",marginBottom:4}}>{solicProd.nombre}</div>
-          <div style={{fontSize:12,color:"#666",marginBottom:10}}>
-            {recetas.find(re=>re.productoResultadoId===solicProd.id)
-              ?`Responsable: ${empleados.find(e=>e.id===recetas.find(re=>re.productoResultadoId===solicProd.id)?.responsableId)?.nombre||"Sin asignar"}`
-              :"Sin receta vinculada — se enviará notificación al equipo"}
-          </div>
-          <SolicitudMateriaInput prod={solicProd} onEnviar={(txt)=>enviarSolicitudMateria(solicProd,txt)} onClose={()=>setSolicProd(null)}/>
+          <SolicitudMateriaInput
+            prod={solicProd}
+            empleados={empleados}
+            recetas={recetas}
+            onEnviar={(txt,destId)=>enviarSolicitudMateria(solicProd,txt,destId)}
+            onClose={()=>setSolicProd(null)}/>
         </Modal>
       )}
     </div>
@@ -1189,8 +1219,10 @@ function TabStock({ resto, yo, esJefe, restoId }) {
 }
 const SK={card:{background:"#161616",border:"1px solid #1e1e1e",borderRadius:10,padding:"12px 14px",marginBottom:8}};
 
-function SolicitudMateriaInput({ prod, onEnviar, onClose }) {
+function SolicitudMateriaInput({ prod, empleados, recetas, onEnviar, onClose }) {
   const [texto, setTexto] = useState("");
+  const recetaVinculada = recetas?.find(re=>re.productoResultadoId===prod.id);
+  const [destId, setDestId] = useState(recetaVinculada?.responsableId||"");
   const sugerencias = [
     `Necesito más ${prod.nombre}`,
     `Urgente — sin stock de ${prod.nombre}`,
@@ -1199,6 +1231,13 @@ function SolicitudMateriaInput({ prod, onEnviar, onClose }) {
   ];
   return (
     <>
+      <label className="ks-label">¿A quién se lo pides?</label>
+      <select className="ks-input" value={destId} onChange={e=>setDestId(e.target.value)}>
+        <option value="">— Sin asignar (notificación general) —</option>
+        {(empleados||[]).map(e=>(
+          <option key={e.id} value={e.id}>{ROLES[e.rol]?.icon} {e.nombre}{recetaVinculada?.responsableId===e.id?" (responsable)":""}</option>
+        ))}
+      </select>
       <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
         {sugerencias.map(s=>(
           <button key={s} className="ks-chip" onClick={()=>setTexto(s)}>{s}</button>
@@ -1209,7 +1248,7 @@ function SolicitudMateriaInput({ prod, onEnviar, onClose }) {
         style={{resize:"none",fontFamily:"inherit"}}/>
       <div style={{display:"flex",gap:8,marginTop:8}}>
         <button className="ks-btn-sec" style={{flex:1}} onClick={onClose}>Cancelar</button>
-        <button className="ks-btn-primary" style={{flex:1}} onClick={()=>onEnviar(texto||`Necesito más ${prod.nombre}`)}>
+        <button className="ks-btn-primary" style={{flex:1}} onClick={()=>onEnviar(texto||`Necesito más ${prod.nombre}`,destId||null)}>
           Enviar solicitud
         </button>
       </div>
